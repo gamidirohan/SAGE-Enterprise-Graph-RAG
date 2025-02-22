@@ -71,7 +71,7 @@ Run these commands **regularly** to keep your GitHub repo updated:
 ### **📌 First-time setup**
 ```bash
 git init
-git remote add origin <your-github-repo-url>
+git remote add origin https://github.com/gamidirohan/SAGE-Enterprise-Graph-RAG.git
 git branch -M main
 ```
 
