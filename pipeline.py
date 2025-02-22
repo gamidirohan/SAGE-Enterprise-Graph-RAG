@@ -319,27 +319,34 @@ if st.button("Process PDF"):
             st.json(structured_data)
 
         
-        
         # Store in Neo4j
         def store_in_neo4j(data):
             driver = get_neo4j_driver()
+            # Use content if available; otherwise, fall back to a combination from document_info (if exists)
+            doc_id = generate_doc_id(data.get("content", data.get("document_info", {}).get("document_type", "")))
+
             with driver.session() as session:
                 # Store Document Node
                 session.run("""
                     MERGE (d:Document {doc_id: $doc_id})
-                    SET d.title = $title, d.doc_type = $doc_type, d.subject = $subject,
-                        d.creation_date = $creation_date, d.modified_date = $modified_date,
-                        d.content = $content, d.summary = $summary, d.version = $version
+                    SET d.title = $title, 
+                        d.doc_type = $doc_type, 
+                        d.subject = $subject,
+                        d.creation_date = $creation_date, 
+                        d.modified_date = $modified_date,
+                        d.content = $content, 
+                        d.summary = $summary, 
+                        d.version = $version
                 """, 
-                doc_id=doc_id,  # Use the hashed doc_id as the unique identifier
-                title=data.get("title"),
-                doc_type=data.get("doc_type"),
-                subject=data.get("subject"),
-                creation_date=data.get("creation_date"),
-                modified_date=data.get("modified_date"),
-                content=data.get("content"),
-                summary=data.get("summary"),
-                version=data.get("version")
+                    doc_id=doc_id,
+                    title=data.get("title", "Untitled"),
+                    doc_type=data.get("doc_type", "other"),
+                    subject=data.get("subject", ""),
+                    creation_date=data.get("creation_date"),
+                    modified_date=data.get("modified_date"),
+                    content=data.get("content", ""),
+                    summary=data.get("summary", ""),
+                    version=data.get("version", "1.0")
                 )
 
                 # Store Entities
@@ -347,15 +354,24 @@ if st.button("Process PDF"):
                     session.run("""
                         MERGE (e:Entity {name: $name})
                         SET e.type = $type, e.confidence = $confidence
-                    """, name=entity["name"], type=entity["type"], confidence=entity.get("confidence"))
+                    """, 
+                        name=entity.get("name", "Unknown Entity"),
+                        type=entity.get("type", "Uncategorized"),
+                        confidence=entity.get("confidence", None)
+                    )
 
                 # Store Relationships
                 for rel in data.get("relationships", []):
+                    print(f"🔗 Storing Relationship: {rel}")  # Debugging line
                     session.run("""
                         MATCH (a:Entity {name: $source})
                         MATCH (b:Entity {name: $target})
                         MERGE (a)-[:RELATION {type: $relation}]->(b)
-                    """, source=rel["source"], target=rel["target"], relation=rel["relation"])
+                    """, 
+                        source=rel.get("source", ""),
+                        target=rel.get("target", ""),
+                        relation=rel.get("relation", "Unknown")
+                    )
 
                 # Store Attachments
                 for attachment in data.get("attachments", []):
@@ -364,90 +380,157 @@ if st.button("Process PDF"):
                         MERGE (a:Attachment {filename: $filename})
                         SET a.filetype = $filetype, a.filesize = $filesize, a.url = $url
                         MERGE (d)-[:HAS_ATTACHMENT]->(a)
-                    """, doc_id=data["doc_id"], filename=attachment["filename"], 
-                        filetype=attachment.get("filetype"), filesize=attachment.get("filesize"), url=attachment.get("url"))
+                    """, 
+                        doc_id=doc_id,
+                        filename=attachment.get("filename", "Unknown"),
+                        filetype=attachment.get("filetype", ""),
+                        filesize=attachment.get("filesize", 0),
+                        url=attachment.get("url", "")
+                    )
 
-                # Store Agile Details
+                # Store Agile Details if available
                 if "agile_details" in data:
                     agile = data["agile_details"]
                     session.run("""
                         MATCH (d:Document {doc_id: $doc_id})
                         MERGE (a:AgileDetails {sprint_number: $sprint_number})
-                        SET a.sprint_goal = $sprint_goal, a.retrospective_notes = $retrospective_notes
+                        SET a.sprint_goal = $sprint_goal, 
+                            a.retrospective_notes = $retrospective_notes
                         MERGE (d)-[:HAS_AGILE_DETAILS]->(a)
-                    """, doc_id=data["doc_id"], sprint_number=agile.get("sprint_number"), 
-                        sprint_goal=agile.get("sprint_goal"), retrospective_notes=agile.get("retrospective_notes"))
+                    """, 
+                        doc_id=doc_id,
+                        sprint_number=agile.get("sprint_number", 0),
+                        sprint_goal=agile.get("sprint_goal", ""),
+                        retrospective_notes=agile.get("retrospective_notes", "")
+                    )
 
-                # Store SDLC Details
+                # Store SDLC Details if available
                 if "sdlc_details" in data:
                     sdlc = data["sdlc_details"]
                     session.run("""
                         MATCH (d:Document {doc_id: $doc_id})
                         MERGE (s:SDLCDetails {doc_id: $doc_id})
-                        SET s.requirements = $requirements, s.design_decisions = $design_decisions, 
-                            s.implementation_notes = $implementation_notes, s.testing_results = $testing_results,
-                            s.deployment_notes = $deployment_notes, s.maintenance_notes = $maintenance_notes
+                        SET s.requirements = $requirements, 
+                            s.design_decisions = $design_decisions, 
+                            s.implementation_notes = $implementation_notes, 
+                            s.testing_results = $testing_results,
+                            s.deployment_notes = $deployment_notes, 
+                            s.maintenance_notes = $maintenance_notes
                         MERGE (d)-[:HAS_SDLC_DETAILS]->(s)
-                    """, doc_id=data["doc_id"], requirements=sdlc.get("requirements"),
-                        design_decisions=sdlc.get("design_decisions"), implementation_notes=sdlc.get("implementation_notes"),
-                        testing_results=sdlc.get("testing_results"), deployment_notes=sdlc.get("deployment_notes"),
-                        maintenance_notes=sdlc.get("maintenance_notes"))
+                    """, 
+                        doc_id=doc_id,
+                        requirements=sdlc.get("requirements", ""),
+                        design_decisions=sdlc.get("design_decisions", ""),
+                        implementation_notes=sdlc.get("implementation_notes", ""),
+                        testing_results=sdlc.get("testing_results", ""),
+                        deployment_notes=sdlc.get("deployment_notes", ""),
+                        maintenance_notes=sdlc.get("maintenance_notes", "")
+                    )
 
-                # Store Bill Details
+                # Store Bill Details if available
                 if "bill_details" in data:
                     bill = data["bill_details"]
                     session.run("""
                         MATCH (d:Document {doc_id: $doc_id})
                         MERGE (b:Bill {invoice_number: $invoice_number})
-                        SET b.vendor = $vendor, b.billing_date = $billing_date, b.due_date = $due_date,
-                            b.total_amount = $total_amount, b.currency = $currency
+                        SET b.vendor = $vendor, 
+                            b.billing_date = $billing_date, 
+                            b.due_date = $due_date,
+                            b.total_amount = $total_amount, 
+                            b.currency = $currency
                         MERGE (d)-[:HAS_BILL]->(b)
-                    """, doc_id=data["doc_id"], invoice_number=bill.get("invoice_number"), 
-                        vendor=bill.get("vendor"), billing_date=bill.get("billing_date"), 
-                        due_date=bill.get("due_date"), total_amount=bill.get("total_amount"), 
-                        currency=bill.get("currency"))
+                    """, 
+                        doc_id=doc_id,
+                        invoice_number=bill.get("invoice_number", "Unknown"),
+                        vendor=bill.get("vendor", ""),
+                        billing_date=bill.get("billing_date"),
+                        due_date=bill.get("due_date"),
+                        total_amount=bill.get("total_amount", 0.0),
+                        currency=bill.get("currency", "USD")
+                    )
 
-                # Store Meeting Details
+                # Store Meeting Details if available
                 if "meeting_details" in data:
                     meeting = data["meeting_details"]
                     session.run("""
                         MATCH (d:Document {doc_id: $doc_id})
                         MERGE (m:Meeting {meeting_date: $meeting_date})
-                        SET m.location = $location, m.agenda = $agenda, m.decisions = $decisions,
+                        SET m.location = $location, 
+                            m.agenda = $agenda, 
+                            m.decisions = $decisions,
                             m.minutes = $minutes
                         MERGE (d)-[:HAS_MEETING]->(m)
-                    """, doc_id=data["doc_id"], meeting_date=meeting.get("meeting_date"),
-                        location=meeting.get("location"), agenda=meeting.get("agenda"), 
-                        decisions=meeting.get("decisions"), minutes=meeting.get("minutes"))
+                    """, 
+                        doc_id=doc_id,
+                        meeting_date=meeting.get("meeting_date"),
+                        location=meeting.get("location", ""),
+                        agenda=meeting.get("agenda", ""),
+                        decisions=meeting.get("decisions", ""),
+                        minutes=meeting.get("minutes", "")
+                    )
 
-                # Store Project Details
+                # Store Project Details if available
                 if "project_details" in data:
                     project = data["project_details"]
                     session.run("""
                         MATCH (d:Document {doc_id: $doc_id})
                         MERGE (p:Project {project_id: $project_id})
-                        SET p.project_name = $project_name, p.start_date = $start_date, 
-                            p.end_date = $end_date, p.status = $status, p.description = $description
+                        SET p.project_name = $project_name, 
+                            p.start_date = $start_date, 
+                            p.end_date = $end_date, 
+                            p.status = $status, 
+                            p.description = $description
                         MERGE (d)-[:RELATED_TO_PROJECT]->(p)
-                    """, doc_id=data["doc_id"], project_id=project.get("project_id"),
-                        project_name=project.get("project_name"), start_date=project.get("start_date"), 
-                        end_date=project.get("end_date"), status=project.get("status"), description=project.get("description"))
+                    """, 
+                        doc_id=doc_id,
+                        project_id=project.get("project_id", "Unknown"),
+                        project_name=project.get("project_name", ""),
+                        start_date=project.get("start_date"),
+                        end_date=project.get("end_date"),
+                        status=project.get("status", ""),
+                        description=project.get("description", "")
+                    )
 
-                # Store Signatures
+                # Store Signatures if available
                 if "signature" in data:
                     signature = data["signature"]
                     session.run("""
                         MATCH (d:Document {doc_id: $doc_id})
                         MERGE (s:Signature {signed_date: $signed_date})
-                        SET s.signer_name = $signer_name, s.signer_email = $signer_email, 
+                        SET s.signer_name = $signer_name, 
+                            s.signer_email = $signer_email, 
                             s.signature_image = $signature_image
                         MERGE (d)-[:SIGNED_BY]->(s)
-                    """, doc_id=data["doc_id"], signed_date=signature.get("signed_date"),
-                        signer_name=signature["signer"].get("name"), signer_email=signature["signer"].get("email"),
-                        signature_image=signature.get("signature_image"))
+                    """, 
+                        doc_id=doc_id,
+                        signed_date=signature.get("signed_date"),
+                        signer_name=signature.get("signer", {}).get("name", "Unknown"),
+                        signer_email=signature.get("signer", {}).get("email", ""),
+                        signature_image=signature.get("signature_image", "")
+                    )
+
+                # Re-query the document node to confirm insertion
+                result = session.run("""
+                    MATCH (d:Document {doc_id: $doc_id})
+                    RETURN d.doc_id AS doc_id, d.title AS title, d.doc_type AS doc_type, d.creation_date AS creation_date
+                """, doc_id=doc_id)
+                stored_document = result.single()
 
             driver.close()
-            return True
+
+            if stored_document:
+                return {
+                    "status": "Success",
+                    "message": "Document stored successfully",
+                    "document": dict(stored_document)
+                }
+            else:
+                return {
+                    "status": "Error",
+                    "message": "Failed to retrieve document after insertion."
+                }
+
+        print("Extracted Relationships:", structured_data.get("relationships", []))
 
         if store_in_neo4j(structured_data):
             st.success("📊 Data successfully stored in Neo4j!")

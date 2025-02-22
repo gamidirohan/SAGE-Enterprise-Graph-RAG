@@ -1,13 +1,10 @@
-# pip install --upgrade pip
 python-dotenv
 neo4j
-pypdf2
+PyPDF2
 langchain
 langchain_groq
+langchain_openai
 langchain-community
-langchain-experimental
-# langchain-huggingface
-transformers
-sentence-transformers
-json-repair
 streamlit
+langchain_core
+pydantic

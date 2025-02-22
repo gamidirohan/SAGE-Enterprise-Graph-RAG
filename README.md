@@ -25,7 +25,8 @@ pip install -r requirements.txt
 ```ini
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=neo4j
+NEO4J_PASSWORD=password
+GROQ_API_KEY= groq_api_key
 ```
 
 ---
