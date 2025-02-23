@@ -1,3 +1,7 @@
 # Environments
 .env/
 myenv/
+
+# Documents
+/files/graph_rag_result.png
+/files/pipeline_result.png

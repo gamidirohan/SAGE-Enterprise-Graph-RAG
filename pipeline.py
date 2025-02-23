@@ -34,14 +34,13 @@ if st.button("Process PDF"):
             """Generate a unique document ID based on the hashed content."""
             return hashlib.sha256(content.encode()).hexdigest()
 
-        
         # Extract text from PDF
         def extract_text_from_pdf(file_path):
             with open(file_path, "rb") as f:
                 pdf_reader = PdfReader(f)
                 text = " ".join([page.extract_text() for page in pdf_reader.pages if page.extract_text()])
             return text
-        
+
         text_data = extract_text_from_pdf(file_path)
         st.success(f"Extracted text from {selected_file}")
 
@@ -303,9 +302,52 @@ if st.button("Process PDF"):
         # Define LLM Prompt
         prompt = ChatPromptTemplate.from_template(
             """
-            Extract entities, relationships, and detailed document information from the following text:
-            {input}
-            Provide the structured output in JSON format:
+            You are an advanced document intelligence system designed to extract structured information from enterprise documents.  
+            Your goal is to convert unstructured text into a well-defined knowledge graph representation.
+
+            **Instructions:**
+            1️⃣ **Extract Entities**: Identify key entities and classify them into **relevant types**, could be persons name, role, document class (SRS, or Billing, or estimates, or plan , or whatever in a software development life cycle), project, financials, etc.:
+            - **Documents**: title, document type, author, version, date, content summary  
+            - **People**: names, roles, organizations, emails, phone numbers  
+            - **Projects**: project names, IDs, stakeholders  
+            - **Financials**: invoices, vendors, amounts, billing dates  
+            - **Agile/SDLC Data**: sprint details, requirements, testing notes  
+
+            2️⃣ **Extract Relationships**:  
+            - Define meaningful **connections** between entities using **precise relationship types**.  
+            - Example: `"source": "Project", "target": "Document", "type": "specifies"`  
+
+            3️⃣ **Preserve Document Structure**:  
+            - Extract **hierarchical sections** and subsections.  
+            - Maintain **traceability links** between sections.  
+
+            4️⃣ **Ensure Accuracy**:  
+            - Avoid hallucinating information.  
+            - Retain original terminology used in the document.  
+            - Include confidence scores for each entity extraction.  
+
+            **Output Format:**  
+            Provide the structured data in **JSON format** following this schema:  
+            ```json
+            {{
+                "doc_id": "<hashed_document_id>",
+                "title": "<document_title>",
+                "doc_type": "<document_type>",
+                "entities": [
+                    {{"name": "<entity_name>", "type": "<entity_type>", "confidence": <score>}}
+                ],
+                "relationships": [
+                    {{"source": "<entity_1>", "target": "<entity_2>", "type": "<relationship_type>"}}
+                ],
+                "document_structure": [
+                    {{"title": "<section_title>", "content": "<section_content>", "subsections": [...]}}
+                ]
+            }}
+            ```
+            **Input Document:**  
+            ```  
+            {input}  
+            ```
             """
         )
 
@@ -318,39 +360,43 @@ if st.button("Process PDF"):
             structured_data = chain.invoke({"input": text_data})
             st.json(structured_data)
 
-        
+        # Function to clean data (remove None or empty string values)
+        def clean_properties(props):
+            return {k: v for k, v in props.items() if v not in [None, ""]}
+
         # Store in Neo4j
         def store_in_neo4j(data):
             driver = get_neo4j_driver()
-            # Use content if available; otherwise, fall back to a combination from document_info (if exists)
+            # Use content if available; otherwise, fall back to document_info.document_type if exists
             doc_id = generate_doc_id(data.get("content", data.get("document_info", {}).get("document_type", "")))
 
             with driver.session() as session:
-                # Store Document Node
-                session.run("""
-                    MERGE (d:Document {doc_id: $doc_id})
-                    SET d.title = $title, 
-                        d.doc_type = $doc_type, 
-                        d.subject = $subject,
-                        d.creation_date = $creation_date, 
-                        d.modified_date = $modified_date,
-                        d.content = $content, 
-                        d.summary = $summary, 
-                        d.version = $version
-                """, 
-                    doc_id=doc_id,
-                    title=data.get("title", "Untitled"),
-                    doc_type=data.get("doc_type", "other"),
-                    subject=data.get("subject", ""),
-                    creation_date=data.get("creation_date"),
-                    modified_date=data.get("modified_date"),
-                    content=data.get("content", ""),
-                    summary=data.get("summary", ""),
-                    version=data.get("version", "1.0")
-                )
+                # Prepare Document properties dynamically
+                doc_props = {
+                    "title": data.get("title", "Untitled"),
+                    "doc_type": data.get("doc_type", "other"),
+                    "subject": data.get("subject", ""),
+                    "creation_date": data.get("creation_date", "1970-01-01T00:00:00Z"),
+                    "modified_date": data.get("modified_date", "1970-01-01T00:00:00Z"),
+                    "content": data.get("content", ""),
+                    "summary": data.get("summary", ""),
+                    "version": data.get("version", "1.0")
+                }
+                doc_props = clean_properties(doc_props)
+                set_query = ", ".join([f"d.{k} = ${k}" for k in doc_props.keys()])
+                query = f"""
+                    MERGE (d:Document {{doc_id: $doc_id}})
+                    SET {set_query}
+                """
+                params = {"doc_id": doc_id}
+                params.update(doc_props)
+                session.run(query, **params)
 
                 # Store Entities
                 for entity in data.get("entities", []):
+                    # If the entity is a string, convert it to a dict with the key "name"
+                    if not isinstance(entity, dict):
+                        entity = {"name": entity, "type": "Uncategorized", "confidence": None}
                     session.run("""
                         MERGE (e:Entity {name: $name})
                         SET e.type = $type, e.confidence = $confidence
@@ -360,18 +406,20 @@ if st.button("Process PDF"):
                         confidence=entity.get("confidence", None)
                     )
 
-                # Store Relationships
+                # Store Relationships (Ensure Nodes Exist Before Linking)
                 for rel in data.get("relationships", []):
-                    print(f"🔗 Storing Relationship: {rel}")  # Debugging line
-                    session.run("""
-                        MATCH (a:Entity {name: $source})
-                        MATCH (b:Entity {name: $target})
-                        MERGE (a)-[:RELATION {type: $relation}]->(b)
-                    """, 
-                        source=rel.get("source", ""),
-                        target=rel.get("target", ""),
-                        relation=rel.get("relation", "Unknown")
-                    )
+                    if isinstance(rel, dict):  # Ensure rel is a dictionary
+                        print(f"🔗 Storing Relationship: {rel}")  # Debugging
+                        
+                        session.run("""
+                            MERGE (a:Entity {name: $source})
+                            MERGE (b:Entity {name: $target})
+                            MERGE (a)-[:RELATION {type: $relation}]->(b)
+                        """, 
+                        source=rel.get("source", ""), 
+                        target=rel.get("target", ""), 
+                        relation=rel.get("type", "Unknown"))  # Ensure correct key for relation type
+
 
                 # Store Attachments
                 for attachment in data.get("attachments", []):
