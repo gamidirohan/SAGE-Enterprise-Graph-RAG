@@ -3,6 +3,7 @@ neo4j
 PyPDF2
 langchain
 langchain_groq
+langchain_neo4j
 langchain_openai
 langchain-community
 streamlit
