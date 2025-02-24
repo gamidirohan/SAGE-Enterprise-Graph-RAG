@@ -390,21 +390,26 @@ if st.button("Process PDF"):
                 """
                 params = {"doc_id": doc_id}
                 params.update(doc_props)
-                session.run(query, **params)
 
-                # Store Entities
+                # Store document node
+                session.run(
+                    """
+                    MERGE (d:Document {doc_id: $doc_id})
+                    SET d.title = $title, d.doc_type = $doc_type
+                    """,
+                    doc_id=doc_id, title=data["title"], doc_type=data["doc_type"]
+                )
+
+                # Store entities with document_id
                 for entity in data.get("entities", []):
-                    # If the entity is a string, convert it to a dict with the key "name"
-                    if not isinstance(entity, dict):
-                        entity = {"name": entity, "type": "Uncategorized", "confidence": None}
-                    session.run("""
-                        MERGE (e:Entity {name: $name})
-                        SET e.type = $type, e.confidence = $confidence
-                    """, 
-                        name=entity.get("name", "Unknown Entity"),
-                        type=entity.get("type", "Uncategorized"),
-                        confidence=entity.get("confidence", None)
+                    session.run(
+                        """
+                        MERGE (e:Entity {name: $name, doc_id: $doc_id})
+                        SET e.type = $type
+                        """,
+                        name=entity["name"], type=entity["type"], doc_id=doc_id
                     )
+
 
                 # Store Relationships (Ensure Nodes Exist Before Linking)
                 for rel in data.get("relationships", []):
