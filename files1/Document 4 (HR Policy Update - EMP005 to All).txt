@@ -1,0 +1,11 @@
+Sender: EMP005
+Receiver: EMP001, EMP002, EMP003, EMP004
+
+Subject: Updated HR Policies
+
+Dear Team,
+
+Please be advised that we have updated our HR policies regarding remote work and time tracking. These changes are effective immediately. The updated policies are designed to provide greater flexibility while ensuring accountability. You can access the full policy document on the company intranet.
+
+Specifically, the remote work policy now allows for more flexible scheduling, but requires employees to maintain clear communication with their team leads. Time tracking is now done through a new automated system, which will streamline the process and reduce administrative overhead. Please review the updated policies and direct any questions to the HR department. We're also planning a Q&A session next week to address any concerns.
+
