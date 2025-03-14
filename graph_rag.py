@@ -5,12 +5,17 @@ from neo4j import GraphDatabase
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 import numpy as np
+import re
+from langchain_groq import ChatGroq
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
 # Load environment variables
 load_dotenv()
 NEO4J_URI = os.getenv("NEO4J_URI")
 NEO4J_USER = os.getenv("NEO4J_USER")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Initialize Neo4j connection
 def get_neo4j_driver():
@@ -23,7 +28,7 @@ def get_embedding_model():
 
 # Streamlit UI
 st.set_page_config(page_title="SAGE: Graph-Based Chat", layout="wide")
-st.title("📄🔗 SAGE: Graph Query Interface (No LLM)")
+st.title("📄🔗 SAGE: Graph Query Interface (LangChain Groq DeepSeek)")
 
 # Initialize session state
 if "chat_history" not in st.session_state:
@@ -120,12 +125,12 @@ def query_graph(user_input):
                 WITH d, d.embedding AS doc_embedding, $query_embedding AS query_embedding
                 WITH d, gds.similarity.cosine(doc_embedding, query_embedding) AS similarity
                 ORDER BY similarity DESC
-                LIMIT 5
-                RETURN d.doc_id AS doc_id, d.content AS content, similarity
+                LIMIT 3
+                RETURN d.content AS content, similarity
             """
             vector_results = session.run(vector_query, query_embedding=query_embedding.tolist()).data()
             if vector_results:
-                results = vector_results
+                results = [item['content'] for item in vector_results]
 
         except Exception as e:
             st.error(f"Vector search failed: {str(e)}")
@@ -133,7 +138,21 @@ def query_graph(user_input):
     driver.close()
     return results
 
-# Custom chat input with dynamic button
+def generate_groq_response(query, documents):
+    if not documents:
+        return "No relevant information found."
+    context = "\n\n".join(documents)
+    prompt_template = ChatPromptTemplate.from_template(
+        "Answer the following question based on the provided context:\n\nQuestion: {query}\n\nContext:\n{context}\n\nAnswer:"
+    )
+    llm = ChatGroq(model_name="deepseek-r1-distill-llama-70b", temperature=0.0, groq_api_key=GROQ_API_KEY)
+    chain = prompt_template | llm | StrOutputParser()
+
+    try:
+        return chain.invoke({"query": query, "context": context})
+    except Exception as e:
+        return f"Groq API error: {str(e)}"
+
 def on_enter():
     if st.session_state.user_input:
         st.session_state.temp_input = st.session_state.user_input
@@ -159,13 +178,15 @@ if st.session_state.processing:
         try:
             user_input = st.session_state.get("temp_input", "")
             graph_results = query_graph(user_input)
+            groq_response = generate_groq_response(user_input, graph_results)
 
-            if graph_results:
-                st.write("Results:")
-                st.write(graph_results)
-                answer = str(graph_results)
-            else:
-                answer = "No relevant data found in the graph."
+            # Process <think> tags
+            think_parts = re.findall(r"<think>(.*?)</think>", groq_response, re.DOTALL)
+            answer = re.sub(r"<think>.*?</think>", "", groq_response, flags=re.DOTALL).strip()
+
+            if think_parts:
+                for think_part in think_parts:
+                    st.markdown(f'<div style="background-color: #f0f0f0; padding: 10px; border-radius: 5px;">{think_part}</div>', unsafe_allow_html=True)
 
             st.session_state.chat_history.append((user_input, answer))
 
