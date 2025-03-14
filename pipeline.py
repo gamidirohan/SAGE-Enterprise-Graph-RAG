@@ -8,6 +8,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from PyPDF2 import PdfReader
 
+# Add after other imports
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
 # Load Neo4j credentials from .env
 load_dotenv()
 NEO4J_URI = os.getenv("NEO4J_URI")
@@ -25,6 +29,17 @@ st.title("📄🔗 PDF Chatbot + Knowledge Graph in Neo4j")
 # Load PDF files from 'files' directory
 pdf_files = [f for f in os.listdir("files") if f.endswith(".pdf")]
 selected_file = st.selectbox("📂 Select a PDF file:", pdf_files)
+
+# Initialize embedding model
+@st.cache_resource
+def get_embedding_model():
+    return SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+
+# Function to generate embeddings
+def generate_embedding(text):
+    model = get_embedding_model()
+    embedding = model.encode(text)
+    return embedding.tolist()
 
 if st.button("Process PDF"):
     if selected_file:
@@ -58,242 +73,47 @@ if st.button("Process PDF"):
         schema = {
             "type": "object",
             "properties": {
-                "doc_id": {"type": "string"},
+                "doc_id": { "type": "string" },
                 "doc_type": {
-                    "type": "string",
-                    "enum": [
-                        "email", "invoice", "meeting_minutes", "user_story", "bug_report",
-                        "project_plan", "specification", "contract", "report", "bill",
-                        "agile_artifact", "other"
-                    ]
+                "type": "string",
+                "enum": [
+                    "email",
+                    "report",
+                    "contract",
+                    "document",
+                    "other"
+                ]
                 },
-                "title": {"type": "string"},
-                "subject": {"type": "string"},
-                "creation_date": {"type": "string", "format": "date-time"},
-                "modified_date": {"type": "string", "format": "date-time"},
-                "sender": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "email": {"type": "string"},
-                        "role": {"type": "string"},
-                        "organization": {"type": "string"},
-                        "phone": {"type": "string"}
-                    }
-                },
-                "recipients": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "email": {"type": "string"},
-                            "role": {"type": "string"},
-                            "organization": {"type": "string"},
-                            "phone": {"type": "string"}
-                        }
-                    }
-                },
-                "cc": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "email": {"type": "string"},
-                            "role": {"type": "string"},
-                            "organization": {"type": "string"},
-                            "phone": {"type": "string"}
-                        }
-                    }
-                },
-                "content": {"type": "string"},
-                "summary": {"type": "string"},
-                "keywords": {
-                    "type": "array",
-                    "items": {"type": "string"}
-                },
-                "attachments": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "filename": {"type": "string"},
-                            "filetype": {"type": "string"},
-                            "filesize": {"type": "integer"},
-                            "url": {"type": "string"}
-                        }
-                    }
-                },
+                "title": { "type": "string" },
+                "content": { "type": "string" },
                 "entities": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "type": {"type": "string"},
-                            "confidence": {"type": "number"}
-                        }
-                    }
-                },
-                "relationships": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "source": {"type": "string"},
-                            "target": {"type": "string"},
-                            "relation": {"type": "string"}
-                        }
-                    }
-                },
-                "agile_details": {
+                "type": "array",
+                "items": {
                     "type": "object",
                     "properties": {
-                        "sprint_number": {"type": "integer"},
-                        "sprint_goal": {"type": "string"},
-                        "backlog_items": {
-                            "type": "array",
-                            "items": {"type": "string"}
-                        },
-                        "user_stories": {
-                            "type": "array",
-                            "items": {"type": "string"}
-                        },
-                        "retrospective_notes": {"type": "string"},
-                        "standup_updates": {
-                            "type": "array",
-                            "items": {"type": "string"}
-                        }
-                    }
-                },
-                "sdlc_details": {
-                    "type": "object",
-                    "properties": {
-                        "requirements": {"type": "string"},
-                        "design_decisions": {"type": "string"},
-                        "implementation_notes": {"type": "string"},
-                        "testing_results": {"type": "string"},
-                        "deployment_notes": {"type": "string"},
-                        "maintenance_notes": {"type": "string"}
-                    }
-                },
-                "bill_details": {
-                    "type": "object",
-                    "properties": {
-                        "invoice_number": {"type": "string"},
-                        "vendor": {"type": "string"},
-                        "billing_date": {"type": "string", "format": "date-time"},
-                        "due_date": {"type": "string", "format": "date-time"},
-                        "line_items": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "description": {"type": "string"},
-                                    "quantity": {"type": "integer"},
-                                    "unit_price": {"type": "number"},
-                                    "total_price": {"type": "number"}
-                                }
-                            }
-                        },
-                        "total_amount": {"type": "number"},
-                        "currency": {"type": "string"}
-                    }
-                },
-                "meeting_details": {
-                    "type": "object",
-                    "properties": {
-                        "meeting_date": {"type": "string", "format": "date-time"},
-                        "location": {"type": "string"},
-                        "attendees": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "email": {"type": "string"},
-                                    "role": {"type": "string"},
-                                    "organization": {"type": "string"},
-                                    "phone": {"type": "string"}
-                                }
-                            }
-                        },
-                        "agenda": {"type": "string"},
-                        "decisions": {"type": "string"},
-                        "action_items": {
-                            "type": "array",
-                            "items": {"type": "string"}
-                        },
-                        "minutes": {"type": "string"}
-                    }
-                },
-                "document_structure": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/Section"
-                    }
-                },
-                "signature": {
-                    "type": "object",
-                    "properties": {
-                        "signer": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string"},
-                                "email": {"type": "string"},
-                                "role": {"type": "string"},
-                                "organization": {"type": "string"},
-                                "phone": {"type": "string"}
-                            }
-                        },
-                        "signed_date": {"type": "string", "format": "date-time"},
-                        "signature_image": {"type": "string"}
-                    }
-                },
-                "project_details": {
-                    "type": "object",
-                    "properties": {
-                        "project_name": {"type": "string"},
-                        "project_id": {"type": "string"},
-                        "stakeholders": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "email": {"type": "string"},
-                                    "role": {"type": "string"},
-                                    "organization": {"type": "string"},
-                                    "phone": {"type": "string"}
-                                }
-                            }
-                        },
-                        "start_date": {"type": "string", "format": "date-time"},
-                        "end_date": {"type": "string", "format": "date-time"},
-                        "status": {"type": "string"},
-                        "description": {"type": "string"}
-                    }
-                },
-                "external_links": {
-                    "type": "array",
-                    "items": {"type": "string"}
-                },
-                "version": {"type": "string"}
-            },
-            "definitions": {
-                "Section": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "content": {"type": "string"},
-                        "subsections": {
-                            "type": "array",
-                            "items": {"$ref": "#/definitions/Section"}
-                        }
+                    "name": { "type": "string" },
+                    "type": { "type": "string" }
                     }
                 }
-            }
+                },
+                "relationships": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                    "source": { "type": "string" },
+                    "target": { "type": "string" },
+                    "relation": { "type": "string" }
+                    }
+                }
+                }
+            },
+            "required": [
+                "doc_id",
+                "doc_type",
+                "entities",
+                "relationships"
+            ]
         }
 
         # JSON Output Parser
@@ -303,10 +123,10 @@ if st.button("Process PDF"):
         prompt = ChatPromptTemplate.from_template(
             """
             You are an advanced document intelligence system designed to extract structured information from enterprise documents.  
-            Your goal is to convert unstructured text into a well-defined knowledge graph representation.
+            Your goal is to convert unstructured text into a well-defined knowledge graph representation in JSON format.
 
             **Instructions:**
-            1️⃣ **Extract Entities**: Identify key entities and classify them into **relevant types**, could be persons name, role, document class (SRS, or Billing, or estimates, or plan , or whatever in a software development life cycle), project, financials, etc.:
+            1️⃣ **Extract Entities**: Identify key entities and classify them into **relevant types**:
             - **Documents**: title, document type, author, version, date, content summary  
             - **People**: names, roles, organizations, emails, phone numbers  
             - **Projects**: project names, IDs, stakeholders  
@@ -348,9 +168,10 @@ if st.button("Process PDF"):
             ```  
             {input}  
             ```
+
+            Remember to output ONLY valid JSON that follows the schema exactly.
             """
         )
-
 
         # Create processing pipeline
         chain = prompt | llm | parser
@@ -391,40 +212,54 @@ if st.button("Process PDF"):
                 params = {"doc_id": doc_id}
                 params.update(doc_props)
 
-                # Store document node
+                # Generate embeddings for document content
+                content_for_embedding = data.get("title", "") + " " + data.get("content", "") + " " + data.get("summary", "")
+                content_embedding = generate_embedding(content_for_embedding[:5000])  # Limit text length
+
                 session.run(
                     """
                     MERGE (d:Document {doc_id: $doc_id})
-                    SET d.title = $title, d.doc_type = $doc_type
+                    SET d.title = $title, 
+                        d.doc_type = $doc_type,
+                        d.embedding = $embedding
                     """,
-                    doc_id=doc_id, title=data["title"], doc_type=data["doc_type"]
+                    doc_id=doc_id, 
+                    title=data["title"], 
+                    doc_type=data["doc_type"],
+                    embedding=content_embedding
                 )
 
-                # Store entities with document_id
+                # Store Entities (Global Entity Linking)
                 for entity in data.get("entities", []):
-                    session.run(
-                        """
-                        MERGE (e:Entity {name: $name, doc_id: $doc_id})
-                        SET e.type = $type
-                        """,
-                        name=entity["name"], type=entity["type"], doc_id=doc_id
-                    )
-
-
-                # Store Relationships (Ensure Nodes Exist Before Linking)
+                    entity_embedding = generate_embedding(entity["name"])
+                    session.run("""
+                        MERGE (e:Entity {name: $name})
+                        SET e.type = $type,
+                            e.embedding = $embedding
+                        MERGE (e)-[:MENTIONED_IN]->(d)
+                    """, name=entity["name"], type=entity["type"], doc_id=doc_id, embedding=entity_embedding)
+                
+                # Store Relationships
                 for rel in data.get("relationships", []):
-                    if isinstance(rel, dict):  # Ensure rel is a dictionary
-                        print(f"🔗 Storing Relationship: {rel}")  # Debugging
-                        
-                        session.run("""
-                            MERGE (a:Entity {name: $source})
-                            MERGE (b:Entity {name: $target})
-                            MERGE (a)-[:RELATION {type: $relation}]->(b)
-                        """, 
-                        source=rel.get("source", ""), 
-                        target=rel.get("target", ""), 
-                        relation=rel.get("type", "Unknown"))  # Ensure correct key for relation type
-
+                    session.run("""
+                        MATCH (a:Entity {name: $source}), (b:Entity {name: $target})
+                        MERGE (a)-[:RELATION {type: $relation}]->(b)
+                    """, source=rel["source"], target=rel["target"], relation=rel["type"])
+                
+                # Infer Cross-Document Relationships
+                session.run("""
+                    MATCH (p:Entity)-[:MENTIONED_IN]->(d1:Document), (p)-[:MENTIONED_IN]->(d2:Document)
+                    WHERE d1 <> d2
+                    MERGE (d1)-[:RELATED]->(d2)
+                """)
+                
+                # Group Documents by Type
+                session.run("""
+                    MERGE (g:DocumentGroup {name: $doc_type})
+                    WITH g
+                    MATCH (d:Document {doc_id: $doc_id})
+                    MERGE (d)-[:PART_OF]->(g)
+                """, doc_type=data.get("doc_type", "Other"), doc_id=doc_id)
 
                 # Store Attachments
                 for attachment in data.get("attachments", []):
