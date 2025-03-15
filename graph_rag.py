@@ -1,6 +1,5 @@
 import streamlit as st
 import os
-import hashlib
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
