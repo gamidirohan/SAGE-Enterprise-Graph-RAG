@@ -120,17 +120,21 @@ def query_graph(user_input):
     with driver.session() as session:
         try:
             vector_query = """
-                MATCH (d:Document)
+                MATCH (d)
                 WHERE d.embedding IS NOT NULL
                 WITH d, d.embedding AS doc_embedding, $query_embedding AS query_embedding
                 WITH d, gds.similarity.cosine(doc_embedding, query_embedding) AS similarity
                 ORDER BY similarity DESC
                 LIMIT 3
-                RETURN d.content AS content, similarity
+                MATCH (d)-[r]-(n)
+                RETURN d.content AS content, similarity, type(r) as relationship, n.content as related_content
             """
             vector_results = session.run(vector_query, query_embedding=query_embedding.tolist()).data()
             if vector_results:
-                results = [item['content'] for item in vector_results]
+                results = [
+                    f"Content: {item['content']}, Relationship: {item['relationship']}, Related Content: {item['related_content']}"
+                    for item in vector_results
+                ]
 
         except Exception as e:
             st.error(f"Vector search failed: {str(e)}")
