@@ -119,21 +119,24 @@ def query_graph(user_input):
     with driver.session() as session:
         try:
             vector_query = """
-                MATCH (d)
-                WHERE d.embedding IS NOT NULL
-                WITH d, d.embedding AS doc_embedding, $query_embedding AS query_embedding
-                WITH d, gds.similarity.cosine(doc_embedding, query_embedding) AS similarity
+                MATCH (c:Chunk)-[:PART_OF]->(d:Document)
+                WHERE c.embedding IS NOT NULL
+                WITH c, d, c.embedding AS chunk_embedding, $query_embedding AS query_embedding
+                WITH c, d, gds.similarity.cosine(chunk_embedding, query_embedding) AS similarity
                 ORDER BY similarity DESC
                 LIMIT 3
-                MATCH (d)-[r]-(n)
-                RETURN d.content AS content, similarity, type(r) as relationship, n.content as related_content
+                MATCH (c)-[r]-(n)
+                RETURN c.summary AS chunk_summary, d, similarity, type(r) as relationship, n
             """
             vector_results = session.run(vector_query, query_embedding=query_embedding.tolist()).data()
+
             if vector_results:
                 results = [
-                    f"Content: {item['content']}, Relationship: {item['relationship']}, Related Content: {item['related_content']}"
+                    f"Chunk Summary: {item['chunk_summary']}, Document: {item['d']}, Similarity: {item['similarity']}, Relationship: {item['relationship']}, Related Node: {item['n']}"
                     for item in vector_results
                 ]
+            else:
+                results = ["No relevant data found in the graph."]
 
         except Exception as e:
             st.error(f"Vector search failed: {str(e)}")
@@ -144,7 +147,7 @@ def query_graph(user_input):
 def generate_groq_response(query, documents):
     if not documents:
         return "No relevant information found."
-    context = "\n\n".join(documents)
+    context = "\n\n".join([item.split('Chunk Summary: ')[1].split(', Document: ')[0] for item in documents]) #Extracts the chunk summary.
     prompt_template = ChatPromptTemplate.from_template(
         "Answer the following question based on the provided context:\n\nQuestion: {query}\n\nContext:\n{context}\n\nAnswer:"
     )

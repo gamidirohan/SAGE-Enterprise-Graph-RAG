@@ -8,6 +8,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from sentence_transformers import SentenceTransformer
 from PyPDF2 import PdfReader
+import nltk
+from nltk.tokenize import sent_tokenize, word_tokenize
+
+nltk.download('punkt')
 
 # Load Neo4j credentials from .env
 load_dotenv()
@@ -121,7 +125,7 @@ else:
                     Remember to output ONLY valid JSON that follows the schema exactly.
                     """
                 )
-
+                
                 # Create processing pipeline
                 chain = prompt | llm | parser
 
@@ -130,26 +134,45 @@ else:
                     structured_data = chain.invoke({"input": document_text})
                     st.json(structured_data)
 
-                # Store in Neo4j
-                def store_in_neo4j(data):
+                # Modified store_in_neo4j function
+                def store_in_neo4j(data, document_text):
                     driver = get_neo4j_driver()
+                    llm = ChatGroq(model_name="deepseek-r1-distill-llama-70b", temperature=0.0, model_kwargs={"response_format": {"type": "json_object"}})
                     with driver.session() as session:
                         # Create Document node
-                        embedding = generate_embedding(data["content"][:5000])
-                        print("Generated Embedding:", embedding)
-                        print("Embedding Data Type:", type(embedding))
-                        print("Embedding First Element Data Type:", type(embedding[0]))
+                        document_summary = llm.invoke(f"Summarize this document, include the word json in the summary: {document_text}").content
+                        embedding = generate_embedding(document_summary[:5000])
                         session.run(
                             """
                             MERGE (d:Document {doc_id: $doc_id})
-                            SET d.sender = $sender, d.subject = $subject, d.content = $content, d.embedding = $embedding
+                            SET d.sender = $sender, d.subject = $subject, d.content = $content, d.embedding = $embedding, d.summary = $summary
                             """,
                             doc_id=data["doc_id"],
                             sender=data["sender"],
                             subject=data["subject"],
                             content=data["content"],
-                            embedding=embedding
+                            embedding=embedding,
+                            summary=document_summary
                         )
+
+                        # Chunk and create Chunk nodes
+                        chunks = chunk_document(document_text)
+                        for i, chunk in enumerate(chunks):
+                            chunk_summary = llm.invoke(f"Summarize this chunk, include the word json in the summary: {chunk}").content
+                            chunk_embedding = generate_embedding(chunk_summary)
+                            session.run(
+                                """
+                                MERGE (c:Chunk {chunk_id: $chunk_id})
+                                SET c.content = $content, c.embedding = $embedding, c.summary = $summary
+                                MERGE (d:Document {doc_id: $doc_id})
+                                MERGE (c)-[:PART_OF]->(d)
+                                """,
+                                chunk_id=f"{data['doc_id']}-chunk-{i}",
+                                content=chunk,
+                                embedding=chunk_embedding,
+                                summary=chunk_summary,
+                                doc_id=data["doc_id"]
+                            )
 
                         # Create Sender and Receiver nodes and relationships
                         session.run(
@@ -171,10 +194,47 @@ else:
                                 receiver_id=receiver,
                                 doc_id=data["doc_id"]
                             )
-                    driver.close()
-                    return True
+                        driver.close()
+                        return True
+                    
+                def chunk_document(document_text, max_chunk_words=250, overlap_sentences=2):
+                    """
+                    Chunks a document into semantically meaningful units.
 
-                if store_in_neo4j(structured_data):
+                    Args:
+                        document_text (str): The document text.
+                        max_chunk_words (int): Maximum number of words per chunk.
+                        overlap_sentences (int): Number of sentences to overlap between chunks.
+
+                    Returns:
+                        list: A list of chunks.
+                    """
+                    paragraphs = document_text.split("\n\n")
+                    chunks = []
+                    previous_sentences = []
+
+                    for paragraph in paragraphs:
+                        sentences = sent_tokenize(paragraph)
+                        current_chunk = []
+
+                        for sentence in sentences:
+                            current_chunk.append(sentence)
+
+                            if len(word_tokenize(" ".join(current_chunk))) > max_chunk_words:
+                                chunk_text = " ".join(previous_sentences + current_chunk[:-1])
+                                chunks.append(chunk_text)
+
+                                previous_sentences = current_chunk[-overlap_sentences:] if len(current_chunk) > overlap_sentences else current_chunk
+                                current_chunk = current_chunk[-overlap_sentences:] if len(current_chunk) > overlap_sentences else []
+
+                        if current_chunk:
+                            chunk_text = " ".join(previous_sentences + current_chunk)
+                            chunks.append(chunk_text)
+                            previous_sentences = current_chunk[-overlap_sentences:] if len(current_chunk) > overlap_sentences else current_chunk
+
+                    return chunks
+                
+                if store_in_neo4j(structured_data, document_text): #Added document_text
                     st.success("📊 Data successfully stored in Neo4j!")
             except Exception as e:
                 st.error(f"Error processing document: {e}")
