@@ -35,10 +35,28 @@ if "chat_history" not in st.session_state:
 if "processing" not in st.session_state:
     st.session_state.processing = False
 
-# Display existing chat history
-for user_msg, bot_msg in st.session_state.chat_history:
-    st.chat_message("user").write(user_msg)
-    st.chat_message("assistant").write(bot_msg)
+# Display chat history in a scrollable frame or box with fixed height
+st.subheader("Chat History")
+chat_history_box = st.empty()
+with chat_history_box.container():
+    chat_history_style = """
+    <style>
+    .chat-history {
+        height: 600px;
+        overflow-y: auto;
+        padding: 10px;
+        border: 1px solid grey;
+        border-radius: 5px;
+    }
+    </style>
+    """
+    st.markdown(chat_history_style, unsafe_allow_html=True)
+    st.markdown('<div class="chat-history">', unsafe_allow_html=True)
+    for user_msg, bot_msg in st.session_state.chat_history:
+        st.markdown(f"**User:** {user_msg}")
+        st.markdown(f"**Assistant:** {bot_msg}")
+        st.markdown("---")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # Debug Graph Structure section
 if st.checkbox("Debug Graph Structure"):
@@ -165,6 +183,7 @@ def on_enter():
         st.session_state.user_input = ""
         st.session_state.processing = True
 
+# Chat input at the bottom
 col1, col2 = st.columns([4, 1])
 with col1:
     user_input = st.text_input("Ask a question...", key="user_input", on_change=on_enter)
