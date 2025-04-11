@@ -1,0 +1,20 @@
+[
+  {
+    "id": "ddca079d-f93f-41c0-8454-f2d88ae4f6b0",
+    "username": "rohan",
+    "password_hash": "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92",
+    "created_at": "2025-04-10T09:28:43.110419"
+  },
+  {
+    "id": "296b403f-e0a8-43e2-a081-6d632b575cd9",
+    "username": "vinitha",
+    "password_hash": "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92",
+    "created_at": "2025-04-10T09:29:00.152502"
+  },
+  {
+    "id": "eb1b1ba5-7b56-44fe-affd-9492d5b9257a",
+    "username": "tejaswi",
+    "password_hash": "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92",
+    "created_at": "2025-04-10T09:48:02.775880"
+  }
+]

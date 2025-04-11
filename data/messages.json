@@ -1,0 +1,142 @@
+[
+  {
+    "id": "6e40743d-58dd-47fb-8f71-18eb9dec3798",
+    "chat_id": "187fa8c6-61c2-49f5-b629-b702b2da6680",
+    "sender_id": "296b403f-e0a8-43e2-a081-6d632b575cd9",
+    "content": "Hello Rohan",
+    "type": "text",
+    "document_id": null,
+    "timestamp": "2025-04-10T09:29:32.335019",
+    "is_read": false
+  },
+  {
+    "id": "2b25fd65-ad57-4b8e-9a45-1808cc22fd4b",
+    "chat_id": "187fa8c6-61c2-49f5-b629-b702b2da6680",
+    "sender_id": "ai",
+    "content": "Hello! I hope you're doing well. Let me know if you need any help with Project Phoenix.",
+    "type": "text",
+    "document_id": null,
+    "timestamp": "2025-04-10T09:29:57.818895",
+    "is_read": true
+  },
+  {
+    "id": "1d4b03f3-bd31-4005-ba67-38fa16df0ef5",
+    "chat_id": "114417dc-7e02-449d-903f-ae3ecd6a01b5",
+    "sender_id": "ddca079d-f93f-41c0-8454-f2d88ae4f6b0",
+    "content": "hello vinitha\n",
+    "type": "text",
+    "document_id": null,
+    "timestamp": "2025-04-10T09:34:43.608100",
+    "is_read": false
+  },
+  {
+    "id": "0c17294a-90fe-4a35-a546-c9f875003276",
+    "chat_id": "114417dc-7e02-449d-903f-ae3ecd6a01b5",
+    "sender_id": "ddca079d-f93f-41c0-8454-f2d88ae4f6b0",
+    "content": "Wacha doing\n",
+    "type": "text",
+    "document_id": null,
+    "timestamp": "2025-04-10T09:35:05.911552",
+    "is_read": false
+  },
+  {
+    "id": "4625a6a2-1142-4ff1-bb49-72d6d27b92d9",
+    "chat_id": "114417dc-7e02-449d-903f-ae3ecd6a01b5",
+    "sender_id": "ai",
+    "content": "The project is progressing smoothly with key milestones achieved. The team, including Bob and Carol, is collaborating effectively to address integration challenges and optimize data structures using JSON formats. Everything is on track for successful delivery.",
+    "type": "text",
+    "document_id": null,
+    "timestamp": "2025-04-10T09:35:20.894801",
+    "is_read": true
+  },
+  {
+    "id": "d5b23c64-4d86-4374-ab9c-9b892b8cc27c",
+    "chat_id": "2fc34425-6b59-4476-842f-632a53455aeb",
+    "sender_id": "eb1b1ba5-7b56-44fe-affd-9492d5b9257a",
+    "content": "Hello\n",
+    "type": "text",
+    "document_id": null,
+    "timestamp": "2025-04-10T09:50:25.270751",
+    "is_read": false
+  },
+  {
+    "id": "5d766363-e687-4740-933d-2a8ce689232c",
+    "chat_id": "114417dc-7e02-449d-903f-ae3ecd6a01b5",
+    "sender_id": "ddca079d-f93f-41c0-8454-f2d88ae4f6b0",
+    "content": "Hey",
+    "type": "text",
+    "document_id": null,
+    "timestamp": "2025-04-10T11:44:42.577456",
+    "is_read": false
+  },
+  {
+    "id": "242b4409-0837-4569-8369-c47137d649f8",
+    "chat_id": "114417dc-7e02-449d-903f-ae3ecd6a01b5",
+    "sender_id": "ddca079d-f93f-41c0-8454-f2d88ae4f6b0",
+    "content": "Hey",
+    "type": "text",
+    "document_id": null,
+    "timestamp": "2025-04-10T11:44:50.989560",
+    "is_read": false
+  },
+  {
+    "id": "9d506654-8358-43bf-848e-033dd17c490d",
+    "chat_id": "114417dc-7e02-449d-903f-ae3ecd6a01b5",
+    "sender_id": "ai",
+    "content": "The project is progressing well, with the team addressing integration challenges and focusing on JSON data handling for seamless integration.",
+    "type": "text",
+    "document_id": null,
+    "timestamp": "2025-04-10T11:46:44.079018",
+    "is_read": true
+  },
+  {
+    "id": "c39967c2-37d4-42cb-90f8-0d1ec7425c5c",
+    "chat_id": "b1028e8f-be8d-4c28-b155-483aba5acd39",
+    "sender_id": "ddca079d-f93f-41c0-8454-f2d88ae4f6b0",
+    "content": "Hello",
+    "type": "text",
+    "document_id": null,
+    "timestamp": "2025-04-10T11:59:12.296038",
+    "is_read": false
+  },
+  {
+    "id": "54d56a45-4ec6-45d5-8668-d3d5c7d9ecc5",
+    "chat_id": "b1028e8f-be8d-4c28-b155-483aba5acd39",
+    "sender_id": "ddca079d-f93f-41c0-8454-f2d88ae4f6b0",
+    "content": "Hello",
+    "type": "text",
+    "document_id": null,
+    "timestamp": "2025-04-10T11:59:33.599672",
+    "is_read": false
+  },
+  {
+    "id": "dc6fd7cf-b032-4e07-9848-615cb2bd25d3",
+    "chat_id": "e53c019c-3d30-47ab-86b5-63a0f2862ea6",
+    "sender_id": "ddca079d-f93f-41c0-8454-f2d88ae4f6b0",
+    "content": "Hi Tejaswi",
+    "type": "text",
+    "document_id": null,
+    "timestamp": "2025-04-10T11:59:53.795989",
+    "is_read": false
+  },
+  {
+    "id": "7e87f9ea-4dd5-4b81-a1cc-1ccb4ed4000f",
+    "chat_id": "b1028e8f-be8d-4c28-b155-483aba5acd39",
+    "sender_id": "ddca079d-f93f-41c0-8454-f2d88ae4f6b0",
+    "content": "Hi",
+    "type": "text",
+    "document_id": null,
+    "timestamp": "2025-04-10T12:11:53.312665",
+    "is_read": false
+  },
+  {
+    "id": "c6cde8af-8a4f-4f9d-90cf-8eaf1401cddf",
+    "chat_id": "e53c019c-3d30-47ab-86b5-63a0f2862ea6",
+    "sender_id": "ddca079d-f93f-41c0-8454-f2d88ae4f6b0",
+    "content": "Hello",
+    "type": "text",
+    "document_id": null,
+    "timestamp": "2025-04-10T12:17:31.144965",
+    "is_read": false
+  }
+]

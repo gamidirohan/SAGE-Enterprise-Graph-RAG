@@ -12,7 +12,7 @@ from langchain_core.output_parsers import StrOutputParser
 # Load environment variables
 load_dotenv()
 NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USER = os.getenv("NEO4J_USERNAME")  # Updated from NEO4J_USER to NEO4J_USERNAME
+NEO4J_USER = os.getenv("NEO4J_USERNAME")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
@@ -39,6 +39,7 @@ if "processing" not in st.session_state:
 st.subheader("Chat History")
 chat_history_box = st.empty()
 with chat_history_box.container():
+    # Define CSS for chat history box
     chat_history_style = """
     <style>
     .chat-history {
@@ -47,16 +48,38 @@ with chat_history_box.container():
         padding: 10px;
         border: 1px solid grey;
         border-radius: 5px;
+        /* background-color: #ffffff; Removed for system color adaptation */
+    }
+    .user-message {
+        /* background-color: #f9f9f9; */
+        padding: 8px;
+        border-radius: 8px;
+        margin-bottom: 5px;
+        font-weight: bold;
+    }
+    .bot-message {
+        /*background-color: #e3f2fd;*/
+        padding: 8px;
+        border-radius: 8px;
+        margin-bottom: 10px;
+    }
+    .message-divider {
+        border-bottom: 1px solid #ddd;
+        margin: 10px 0;
     }
     </style>
     """
-    st.markdown(chat_history_style, unsafe_allow_html=True)
-    st.markdown('<div class="chat-history">', unsafe_allow_html=True)
+    
+    # Build the chat history HTML
+    chat_history_html = '<div class="chat-history">'
     for user_msg, bot_msg in st.session_state.chat_history:
-        st.markdown(f"**User:** {user_msg}")
-        st.markdown(f"**Assistant:** {bot_msg}")
-        st.markdown("---")
-    st.markdown('</div>', unsafe_allow_html=True)
+        chat_history_html += f'<div class="user-message">User: {user_msg}</div>'
+        chat_history_html += f'<div class="bot-message">Assistant: {bot_msg}</div>'
+        chat_history_html += '<div class="message-divider"></div>'
+    chat_history_html += '</div>'
+    
+    # Render the complete HTML string at once
+    st.markdown(chat_history_style + chat_history_html, unsafe_allow_html=True)
 
 # Debug Graph Structure section
 if st.checkbox("Debug Graph Structure"):
