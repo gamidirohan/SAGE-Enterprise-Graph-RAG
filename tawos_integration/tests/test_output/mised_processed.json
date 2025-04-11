@@ -1,0 +1,178 @@
+{
+  "documents": [
+    {
+      "doc_id": "test_dialog_id",
+      "sender": "MISeD",
+      "receivers": [
+        "SAGE"
+      ],
+      "subject": "Meeting Transcript: test_meeting_id",
+      "content": "Speaker A: Hello, everyone.\nSpeaker A: Today we'll discuss the project.\nSpeaker B: I have some concerns about the timeline.\nSpeaker C: Let's review the requirements.\n",
+      "metadata": {
+        "source": "MISeD",
+        "meeting_id": "test_meeting_id",
+        "dialog_id": "test_dialog_id"
+      }
+    }
+  ],
+  "entities": [
+    {
+      "id": "speaker_Speaker_A",
+      "name": "Speaker A",
+      "type": "person",
+      "source": "MISeD",
+      "metadata": {
+        "role": "speaker",
+        "meeting_id": "test_meeting_id"
+      }
+    },
+    {
+      "id": "speaker_Speaker_B",
+      "name": "Speaker B",
+      "type": "person",
+      "source": "MISeD",
+      "metadata": {
+        "role": "speaker",
+        "meeting_id": "test_meeting_id"
+      }
+    },
+    {
+      "id": "speaker_Speaker_C",
+      "name": "Speaker C",
+      "type": "person",
+      "source": "MISeD",
+      "metadata": {
+        "role": "speaker",
+        "meeting_id": "test_meeting_id"
+      }
+    },
+    {
+      "id": "topic_What",
+      "name": "What",
+      "type": "topic",
+      "source": "MISeD",
+      "metadata": {
+        "meeting_id": ""
+      }
+    },
+    {
+      "id": "topic_Speaker",
+      "name": "Speaker",
+      "type": "topic",
+      "source": "MISeD",
+      "metadata": {
+        "meeting_id": ""
+      }
+    },
+    {
+      "id": "topic_speaker",
+      "name": "speaker",
+      "type": "topic",
+      "source": "MISeD",
+      "metadata": {
+        "meeting_id": ""
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "id": "speaker_Speaker_A_discusses_topic_What",
+      "source_id": "speaker_Speaker_A",
+      "target_id": "topic_What",
+      "type": "DISCUSSES",
+      "source": "MISeD",
+      "metadata": {
+        "meeting_id": "",
+        "confidence": 0.8
+      }
+    },
+    {
+      "id": "speaker_Speaker_A_discusses_topic_Speaker",
+      "source_id": "speaker_Speaker_A",
+      "target_id": "topic_Speaker",
+      "type": "DISCUSSES",
+      "source": "MISeD",
+      "metadata": {
+        "meeting_id": "",
+        "confidence": 0.8
+      }
+    },
+    {
+      "id": "speaker_Speaker_A_discusses_topic_speaker",
+      "source_id": "speaker_Speaker_A",
+      "target_id": "topic_speaker",
+      "type": "DISCUSSES",
+      "source": "MISeD",
+      "metadata": {
+        "meeting_id": "",
+        "confidence": 0.8
+      }
+    },
+    {
+      "id": "speaker_Speaker_B_discusses_topic_What",
+      "source_id": "speaker_Speaker_B",
+      "target_id": "topic_What",
+      "type": "DISCUSSES",
+      "source": "MISeD",
+      "metadata": {
+        "meeting_id": "",
+        "confidence": 0.8
+      }
+    },
+    {
+      "id": "speaker_Speaker_B_discusses_topic_Speaker",
+      "source_id": "speaker_Speaker_B",
+      "target_id": "topic_Speaker",
+      "type": "DISCUSSES",
+      "source": "MISeD",
+      "metadata": {
+        "meeting_id": "",
+        "confidence": 0.8
+      }
+    },
+    {
+      "id": "speaker_Speaker_B_discusses_topic_speaker",
+      "source_id": "speaker_Speaker_B",
+      "target_id": "topic_speaker",
+      "type": "DISCUSSES",
+      "source": "MISeD",
+      "metadata": {
+        "meeting_id": "",
+        "confidence": 0.8
+      }
+    },
+    {
+      "id": "speaker_Speaker_A_participated_in_meeting_test_meeting_id",
+      "source_id": "speaker_Speaker_A",
+      "target_id": "meeting_test_meeting_id",
+      "type": "PARTICIPATED_IN",
+      "source": "MISeD",
+      "metadata": {
+        "meeting_id": "test_meeting_id",
+        "confidence": 1.0
+      }
+    },
+    {
+      "id": "speaker_Speaker_B_participated_in_meeting_test_meeting_id",
+      "source_id": "speaker_Speaker_B",
+      "target_id": "meeting_test_meeting_id",
+      "type": "PARTICIPATED_IN",
+      "source": "MISeD",
+      "metadata": {
+        "meeting_id": "test_meeting_id",
+        "confidence": 1.0
+      }
+    },
+    {
+      "id": "speaker_Speaker_C_participated_in_meeting_test_meeting_id",
+      "source_id": "speaker_Speaker_C",
+      "target_id": "meeting_test_meeting_id",
+      "type": "PARTICIPATED_IN",
+      "source": "MISeD",
+      "metadata": {
+        "meeting_id": "test_meeting_id",
+        "confidence": 1.0
+      }
+    }
+  ]
+}

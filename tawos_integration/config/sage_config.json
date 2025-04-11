@@ -14,6 +14,13 @@
         "enabled": true,
         "weight": 1.0,
         "description": "Tabular And Web Object Segmentation dataset"
+      },
+      {
+        "name": "MISeD",
+        "type": "neo4j",
+        "enabled": true,
+        "weight": 1.0,
+        "description": "Meeting Intelligence and Summarization Evaluation Dataset"
       }
     ]
   },
@@ -22,7 +29,7 @@
     "user": "neo4j",
     "password": "password",
     "queries": {
-      "entity_query": "MATCH (e) WHERE NOT e:Document RETURN e UNION MATCH (e:Entity) WHERE e.source = 'TAWOS' RETURN e"
+      "entity_query": "MATCH (e) WHERE NOT e:Document RETURN e UNION MATCH (e:Entity) WHERE e.source = 'TAWOS' RETURN e UNION MATCH (e:Entity) WHERE e.source = 'MISeD' RETURN e"
     }
   }
 }
