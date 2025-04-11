@@ -113,7 +113,7 @@ class Neo4jConnector:
             session.run(
                 f"LOAD CSV WITH HEADERS FROM 'file:///{file_path.resolve()}' AS row "
                 f"MATCH (a {{id: row.start_id}}), (b {{id: row.end_id}}) "
-                f"CREATE (a)-[:{{}{{properties: row.properties}}]->(b)"
+                f"CREATE (a)-[:{{}} {{properties: row.properties}}]->(b)"
             )
 
 def load_processed_data(data_dir: Path) -> Dict[str, Any]:
