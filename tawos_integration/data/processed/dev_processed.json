@@ -1,0 +1,16 @@
+{
+  "documents": [],
+  "entities": [
+    {
+      "id": "1",
+      "name": "",
+      "type": "",
+      "metadata": {
+        "source": "TAWOS",
+        "document_id": "",
+        "created_at": ""
+      }
+    }
+  ],
+  "relationships": []
+}

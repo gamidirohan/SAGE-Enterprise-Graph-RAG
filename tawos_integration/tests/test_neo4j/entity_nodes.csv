@@ -1,0 +1,7 @@
+id,name,type,source
+speaker_Speaker_A,"Speaker A","person","MISeD"
+speaker_Speaker_B,"Speaker B","person","MISeD"
+speaker_Speaker_C,"Speaker C","person","MISeD"
+topic_What,"What","topic","MISeD"
+topic_Speaker,"Speaker","topic","MISeD"
+topic_speaker,"speaker","topic","MISeD"
