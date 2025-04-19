@@ -126,12 +126,12 @@ def chunk_document(document_text, max_chunk_words=250, overlap_sentences=2):
 def store_in_neo4j(data, document_text):
     driver = get_neo4j_driver()
     llm = ChatGroq(
-        model_name="deepseek-r1-distill-llama-70b", 
-        temperature=0.0, 
+        model_name="deepseek-r1-distill-llama-70b",
+        temperature=0.0,
         model_kwargs={"response_format": {"type": "json_object"}},
         groq_api_key=GROQ_API_KEY
     )
-    
+
     try:
         with driver.session() as session:
             # Create Document node
@@ -189,7 +189,7 @@ def store_in_neo4j(data, document_text):
                     receiver_id=receiver,
                     doc_id=data["doc_id"]
                 )
-            
+
             return True
     except Exception as e:
         logger.error(f"Error storing in Neo4j: {str(e)}")
@@ -199,13 +199,14 @@ def store_in_neo4j(data, document_text):
 
 # Function to query Neo4j for related data
 def query_graph(user_input):
-    driver = get_neo4j_driver()
-    model = get_embedding_model()
-    query_embedding = model.encode(user_input)
-    query_embedding = np.array(query_embedding, dtype=np.float32)
-
-    results = []
+    driver = None
     try:
+        driver = get_neo4j_driver()
+        model = get_embedding_model()
+        query_embedding = model.encode(user_input)
+        query_embedding = np.array(query_embedding, dtype=np.float32)
+
+        results = []
         with driver.session() as session:
             vector_query = """
                 MATCH (c:Chunk)-[:PART_OF]->(d:Document)
@@ -221,50 +222,97 @@ def query_graph(user_input):
 
             if vector_results:
                 results = [
-                    f"Chunk Summary: {item['chunk_summary']}, Document: {item['d']}, Similarity: {item['similarity']}, Relationship: {item['relationship']}, Related Node: {item['n']}"
+                    f"Chunk Summary: {item.get('chunk_summary', 'No summary')}, Document: {item.get('d', {})}, Similarity: {item.get('similarity', 0)}, Relationship: {item.get('relationship', 'unknown')}, Related Node: {item.get('n', {})}"
                     for item in vector_results
                 ]
             else:
-                results = ["No relevant data found in the graph."]
+                results = ["I don't seem to have any relevant information about that in my knowledge base. Let me know if you'd like to ask about something else!"]
 
+        return results
     except Exception as e:
         logger.error(f"Vector search failed: {str(e)}")
-        raise
+        # Return a message about the error instead of raising
+        return [f"I encountered a technical issue while searching for information. I'd be happy to try again if you rephrase your question!"]
     finally:
-        driver.close()
-        
-    return results
+        if driver:
+            driver.close()
 
 # Function to generate response using Groq
 def generate_groq_response(query, documents):
     if not documents:
-        return "No relevant information found."
-    
-    context = "\n\n".join([item.split('Chunk Summary: ')[1].split(', Document: ')[0] for item in documents])
-    prompt_template = ChatPromptTemplate.from_template(
-        "Answer the following question based on the provided context:\n\nQuestion: {query}\n\nContext:\n{context}\n\nAnswer:"
-    )
-    llm = ChatGroq(
-        model_name="deepseek-r1-distill-llama-70b", 
-        temperature=0.0, 
-        groq_api_key=GROQ_API_KEY
-    )
-    chain = prompt_template | llm | StrOutputParser()
+        return {
+            "answer": "I've searched through my knowledge base, but I don't have any specific information about that topic yet. Would you like to ask about something else or perhaps upload a document with this information?",
+            "thinking": []
+        }
 
     try:
+        # Extract context from documents
+        context_parts = []
+        for item in documents:
+            try:
+                # Try to extract the chunk summary
+                chunk_summary = item.split('Chunk Summary: ')[1].split(', Document: ')[0]
+                context_parts.append(chunk_summary)
+            except (IndexError, AttributeError):
+                # If extraction fails, use the whole item
+                context_parts.append(str(item))
+
+        context = "\n\n".join(context_parts)
+
+        # Create prompt template with SAGE personality
+        prompt_template = ChatPromptTemplate.from_template(
+            """
+            You are SAGE, an intelligent and friendly AI assistant specialized in retrieving and explaining information from documents.
+            Your tone is helpful, conversational, and slightly enthusiastic. You refer to yourself as "I" and address the user directly.
+
+            When answering questions:
+            - Be concise but thorough
+            - Use a friendly, conversational tone
+            - If you're not sure about something, be honest about it
+            - Occasionally use phrases like "I found" or "According to the documents" to emphasize your retrieval capabilities
+            - Format your responses in a readable way with paragraphs and bullet points when appropriate
+
+            Here is the user's question: {query}
+
+            Here is the relevant context from the documents:
+            {context}
+
+            Respond to the user's question in a helpful, conversational way based on the context provided:
+            """
+        )
+
+        # Initialize LLM with slightly higher temperature for more conversational responses
+        llm = ChatGroq(
+            model_name="deepseek-r1-distill-llama-70b",
+            temperature=0.3,
+            groq_api_key=GROQ_API_KEY
+        )
+
+        # Create chain
+        chain = prompt_template | llm | StrOutputParser()
+
+        # Invoke chain
         response = chain.invoke({"query": query, "context": context})
-        
+
         # Process <think> tags
         think_parts = re.findall(r"<think>(.*?)</think>", response, re.DOTALL)
         answer = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
-        
+
+        # Ensure answer is not empty
+        if not answer or answer.isspace():
+            answer = "I'm sorry, but I couldn't find a specific answer to your question in the documents I have access to. Could you try rephrasing your question or asking about something else? I'm here to help!"
+
         return {
             "answer": answer,
             "thinking": think_parts if think_parts else []
         }
     except Exception as e:
         logger.error(f"Groq API error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"LLM processing error: {str(e)}")
+        # Return a graceful error message instead of raising an exception
+        return {
+            "answer": f"I'm sorry, but I seem to be having a bit of trouble processing your question right now. Could we try again in a moment? If the issue persists, you might want to try rephrasing your question. I'm eager to help once we get past this hiccup!",
+            "thinking": [f"Error: {str(e)}"]
+        }
 
 # Pydantic models for request/response validation
 class ChatRequest(BaseModel):
@@ -299,14 +347,18 @@ async def chat_endpoint(request: ChatRequest):
     try:
         # Query the graph for relevant information
         graph_results = query_graph(request.message)
-        
+
         # Generate response using Groq
         response = generate_groq_response(request.message, graph_results)
-        
+
         return response
     except Exception as e:
         logger.error(f"Error in chat endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Return a graceful error response instead of raising an exception
+        return {
+            "answer": "I apologize, but I ran into a small issue while trying to answer your question. Would you mind trying again? I'm here and ready to assist you as soon as we can get past this technical glitch!",
+            "thinking": [f"Error: {str(e)}"]
+        }
 
 @app.post("/api/process-document", response_model=DocumentProcessResponse)
 async def process_document(
@@ -321,7 +373,7 @@ async def process_document(
         file_path = UPLOAD_DIR / file.filename
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        
+
         # Extract text from the document
         if file.filename.endswith('.pdf'):
             document_text = extract_text_from_pdf(str(file_path))
@@ -330,10 +382,10 @@ async def process_document(
                 document_text = f.read()
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format. Only PDF and TXT are supported.")
-        
+
         # Generate document ID
         doc_id = generate_doc_id(document_text)
-        
+
         # Initialize LLM for entity extraction
         llm = ChatGroq(
             model_name="deepseek-r1-distill-llama-70b",
@@ -341,7 +393,7 @@ async def process_document(
             model_kwargs={"response_format": {"type": "json_object"}},
             groq_api_key=GROQ_API_KEY
         )
-        
+
         # Define entity extraction schema
         schema = {
             "type": "object",
@@ -354,10 +406,10 @@ async def process_document(
             },
             "required": ["doc_id", "sender", "receivers", "subject", "content"]
         }
-        
+
         # JSON Output Parser
         parser = JsonOutputParser(pydantic_object=schema)
-        
+
         # Define LLM Prompt
         prompt = ChatPromptTemplate.from_template(
             """
@@ -389,17 +441,27 @@ async def process_document(
             Remember to output ONLY valid JSON that follows the schema exactly.
             """
         )
-        
+
         # Create processing pipeline
         chain = prompt | llm | parser
-        
+
         # Extract structured entities & relationships
         structured_data = chain.invoke({"input": document_text})
         structured_data["doc_id"] = doc_id  # Ensure we use our generated doc_id
-        
+
+        # Ensure all required fields have valid values
+        if "sender" not in structured_data or structured_data["sender"] is None:
+            structured_data["sender"] = "Unknown"
+        if "receivers" not in structured_data or structured_data["receivers"] is None:
+            structured_data["receivers"] = []
+        if "subject" not in structured_data or structured_data["subject"] is None:
+            structured_data["subject"] = "No Subject"
+        if "content" not in structured_data or structured_data["content"] is None:
+            structured_data["content"] = document_text
+
         # Store in Neo4j (run in background to avoid blocking)
         background_tasks.add_task(store_in_neo4j, structured_data, document_text)
-        
+
         return {
             "doc_id": doc_id,
             "sender": structured_data["sender"],
@@ -408,7 +470,7 @@ async def process_document(
             "success": True,
             "message": "Document processing started. Data will be stored in the graph database."
         }
-        
+
     except Exception as e:
         logger.error(f"Error processing document: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing document: {str(e)}")
@@ -425,7 +487,7 @@ async def debug_graph():
     try:
         with driver.session() as session:
             node_counts = session.run("""
-                MATCH (n) 
+                MATCH (n)
                 RETURN labels(n)[0] AS Label, count(*) AS Count
                 ORDER BY Count DESC
             """).data()
@@ -451,7 +513,7 @@ async def debug_graph():
 
             entity_doc_connections = session.run("""
                 MATCH (p:Person)
-                RETURN p.id AS Entity, 
+                RETURN p.id AS Entity,
                     'Person' AS Type,
                     COUNT { (p)--() } AS ConnectionCount
                 ORDER BY ConnectionCount DESC
