@@ -274,7 +274,7 @@ def generate_groq_response(query, documents):
 
             Here is the user's question: {query}
 
-            Here is the relevant context from the documents:
+            Here is the relevant context from the documents(Keep in mind you get limited context and that's what you should work with):
             {context}
 
             Respond to the user's question in a helpful, conversational way based on the context provided:
