@@ -1,7 +1,35 @@
 # Environments
 .env/
 myenv/
+venv/
+ENV/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Uploaded files
+uploads/*
+!uploads/.gitkeep
 
 # Documents
 /files/graph_rag_result.png
 /files/pipeline_result.png
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
