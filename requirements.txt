@@ -15,3 +15,7 @@ python-multipart
 sentence-transformers
 nltk
 numpy
+bert-score
+rouge
+pandas
+matplotlib

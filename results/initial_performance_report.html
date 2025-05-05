@@ -1,0 +1,730 @@
+
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>SAGE vs Traditional RAG Performance Comparison Report</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }
+            h1, h2, h3, h4 { color: #333; }
+            table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background-color: #f2f2f2; }
+            tr:nth-child(even) { background-color: #f9f9f9; }
+            .summary { background-color: #e9f7ef; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+            .model-section { margin-bottom: 30px; border: 1px solid #ddd; padding: 15px; border-radius: 5px; }
+            .metrics { display: flex; justify-content: space-between; flex-wrap: wrap; }
+            .metric-box { background-color: #f8f9fa; padding: 10px; border-radius: 5px; width: 30%; margin-bottom: 10px; }
+            .chart-container { margin: 20px 0; }
+            .chart { max-width: 100%; height: auto; }
+            .winner { font-weight: bold; color: green; }
+            .tab { overflow: hidden; border: 1px solid #ccc; background-color: #f1f1f1; }
+            .tab button { background-color: inherit; float: left; border: none; outline: none; cursor: pointer; padding: 14px 16px; transition: 0.3s; }
+            .tab button:hover { background-color: #ddd; }
+            .tab button.active { background-color: #ccc; }
+            .tabcontent { display: none; padding: 6px 12px; border: 1px solid #ccc; border-top: none; }
+        </style>
+        <script>
+            function openTab(evt, tabName) {
+                var i, tabcontent, tablinks;
+                tabcontent = document.getElementsByClassName("tabcontent");
+                for (i = 0; i < tabcontent.length; i++) {
+                    tabcontent[i].style.display = "none";
+                }
+                tablinks = document.getElementsByClassName("tablinks");
+                for (i = 0; i < tablinks.length; i++) {
+                    tablinks[i].className = tablinks[i].className.replace(" active", "");
+                }
+                document.getElementById(tabName).style.display = "block";
+                evt.currentTarget.className += " active";
+            }
+
+            // Set the default tab to open when the page loads
+            window.onload = function() {
+                document.getElementsByClassName("tablinks")[0].click();
+            };
+        </script>
+    </head>
+    <body>
+        <h1>SAGE vs Traditional RAG Performance Comparison Report</h1>
+        <p>Generated on: 2025-05-03 16:39:28</p>
+
+        <div class="summary">
+            <h2>Executive Summary</h2>
+            <p>This report compares the performance of SAGE (Graph-based RAG) with Traditional RAG across different LLM and embedding models.</p>
+
+            <h3>Key Findings</h3>
+            <ul>
+                <li>Number of model combinations tested: 4</li>
+                <li>Total number of queries: 40</li>
+                <li>Best performing LLM model for SAGE: gemma2-9b-it</li>
+                <li>Best performing embedding model for SAGE: all-mpnet-base-v2</li>
+                <li>Overall winner: Traditional RAG</li>
+            </ul>
+        </div>
+
+        <h2>Model Comparison</h2>
+
+        <div class="chart-container">
+            <h3>Average Scores by Model</h3>
+            <img src="model_score_comparison.png" alt="Model Score Comparison" class="chart">
+        </div>
+
+        <div class="chart-container">
+            <h3>Average Latency by Model</h3>
+            <img src="model_latency_comparison.png" alt="Model Latency Comparison" class="chart">
+        </div>
+
+        <div class="chart-container">
+            <h3>Better System Counts by Model</h3>
+            <img src="model_counts_comparison.png" alt="Model Counts Comparison" class="chart">
+        </div>
+
+        <div class="chart-container">
+            <h3>SAGE Scores Heatmap</h3>
+            <img src="sage_score_heatmap.png" alt="SAGE Score Heatmap" class="chart">
+        </div>
+
+        <div class="chart-container">
+            <h3>Traditional Scores Heatmap</h3>
+            <img src="trad_score_heatmap.png" alt="Traditional Score Heatmap" class="chart">
+        </div>
+
+        <h2>Detailed Metrics</h2>
+
+        <table>
+            <tr>
+                <th>LLM Model</th>
+                <th>Embedding Model</th>
+                <th>SAGE Avg Score</th>
+                <th>Traditional Avg Score</th>
+                <th>SAGE Better Count</th>
+                <th>Traditional Better Count</th>
+                <th>Tie Count</th>
+                <th>SAGE Avg Latency</th>
+                <th>Traditional Avg Latency</th>
+                <th>Avg Similarity F1</th>
+            </tr>
+    
+            <tr>
+                <td>gemma2-9b-it</td>
+                <td>all-mpnet-base-v2</td>
+                <td>0.00</td>
+                <td>0.00</td>
+                <td>0</td>
+                <td>0</td>
+                <td>0</td>
+                <td>2.29s</td>
+                <td>1.16s</td>
+                <td>1.0000</td>
+            </tr>
+        
+            <tr>
+                <td>gemma2-9b-it</td>
+                <td>multi-qa-mpnet-base-dot-v1</td>
+                <td>0.00</td>
+                <td>0.00</td>
+                <td>0</td>
+                <td>0</td>
+                <td>0</td>
+                <td>1.19s</td>
+                <td>0.63s</td>
+                <td>1.0000</td>
+            </tr>
+        
+            <tr>
+                <td>llama3-8b-8192</td>
+                <td>all-mpnet-base-v2</td>
+                <td>0.00</td>
+                <td>0.00</td>
+                <td>0</td>
+                <td>0</td>
+                <td>0</td>
+                <td>2.63s</td>
+                <td>1.29s</td>
+                <td>1.0000</td>
+            </tr>
+        
+            <tr>
+                <td>llama3-8b-8192</td>
+                <td>multi-qa-mpnet-base-dot-v1</td>
+                <td>0.00</td>
+                <td>0.00</td>
+                <td>0</td>
+                <td>0</td>
+                <td>0</td>
+                <td>2.43s</td>
+                <td>1.04s</td>
+                <td>1.0000</td>
+            </tr>
+        
+        </table>
+
+        <h2>Detailed Results by Model</h2>
+
+        <div class="tab">
+    
+            <button class="tablinks" onclick="openTab(event, 'model0')">gemma2-9b-it_all-mpnet-base-v2</button>
+        
+            <button class="tablinks" onclick="openTab(event, 'model1')">gemma2-9b-it_multi-qa-mpnet-base-dot-v1</button>
+        
+            <button class="tablinks" onclick="openTab(event, 'model2')">llama3-8b-8192_all-mpnet-base-v2</button>
+        
+            <button class="tablinks" onclick="openTab(event, 'model3')">llama3-8b-8192_multi-qa-mpnet-base-dot-v1</button>
+        
+        </div>
+    
+        <div id="model0" class="tabcontent">
+            <h3>Results for gemma2-9b-it, all-mpnet-base-v2</h3>
+
+            <div class="metrics">
+                <div class="metric-box">
+                    <h4>Average Scores</h4>
+                    <p>SAGE: 0.00/10</p>
+                    <p>Traditional: 0.00/10</p>
+                </div>
+
+                <div class="metric-box">
+                    <h4>Better System Counts</h4>
+                    <p>SAGE better: 0</p>
+                    <p>Traditional better: 0</p>
+                    <p>Tie: 0</p>
+                </div>
+
+                <div class="metric-box">
+                    <h4>Average Latency</h4>
+                    <p>SAGE: 2.29s</p>
+                    <p>Traditional: 1.16s</p>
+                </div>
+            </div>
+
+            <h4>Query Results</h4>
+            <table>
+                <tr>
+                    <th>Query</th>
+                    <th>SAGE Answer</th>
+                    <th>Traditional Answer</th>
+                    <th>Better System</th>
+                    <th>SAGE Score</th>
+                    <th>Traditional Score</th>
+                </tr>
+        
+                <tr>
+                    <td><think>
+Okay, so the user provided a document in J...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a specific que...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a specific que...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to figure out a question a...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, I need to generate a question about ...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+            </table>
+        </div>
+        
+        <div id="model1" class="tabcontent">
+            <h3>Results for gemma2-9b-it, multi-qa-mpnet-base-dot-v1</h3>
+
+            <div class="metrics">
+                <div class="metric-box">
+                    <h4>Average Scores</h4>
+                    <p>SAGE: 0.00/10</p>
+                    <p>Traditional: 0.00/10</p>
+                </div>
+
+                <div class="metric-box">
+                    <h4>Better System Counts</h4>
+                    <p>SAGE better: 0</p>
+                    <p>Traditional better: 0</p>
+                    <p>Tie: 0</p>
+                </div>
+
+                <div class="metric-box">
+                    <h4>Average Latency</h4>
+                    <p>SAGE: 1.19s</p>
+                    <p>Traditional: 0.63s</p>
+                </div>
+            </div>
+
+            <h4>Query Results</h4>
+            <table>
+                <tr>
+                    <th>Query</th>
+                    <th>SAGE Answer</th>
+                    <th>Traditional Answer</th>
+                    <th>Better System</th>
+                    <th>SAGE Score</th>
+                    <th>Traditional Score</th>
+                </tr>
+        
+                <tr>
+                    <td><think>
+Okay, so the user provided a document in J...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a specific que...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a specific que...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to figure out a question a...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, I need to generate a question about ...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+            </table>
+        </div>
+        
+        <div id="model2" class="tabcontent">
+            <h3>Results for llama3-8b-8192, all-mpnet-base-v2</h3>
+
+            <div class="metrics">
+                <div class="metric-box">
+                    <h4>Average Scores</h4>
+                    <p>SAGE: 0.00/10</p>
+                    <p>Traditional: 0.00/10</p>
+                </div>
+
+                <div class="metric-box">
+                    <h4>Better System Counts</h4>
+                    <p>SAGE better: 0</p>
+                    <p>Traditional better: 0</p>
+                    <p>Tie: 0</p>
+                </div>
+
+                <div class="metric-box">
+                    <h4>Average Latency</h4>
+                    <p>SAGE: 2.63s</p>
+                    <p>Traditional: 1.29s</p>
+                </div>
+            </div>
+
+            <h4>Query Results</h4>
+            <table>
+                <tr>
+                    <th>Query</th>
+                    <th>SAGE Answer</th>
+                    <th>Traditional Answer</th>
+                    <th>Better System</th>
+                    <th>SAGE Score</th>
+                    <th>Traditional Score</th>
+                </tr>
+        
+                <tr>
+                    <td><think>
+Okay, so the user provided a document in J...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a specific que...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a specific que...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to figure out a question a...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, I need to generate a question about ...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+            </table>
+        </div>
+        
+        <div id="model3" class="tabcontent">
+            <h3>Results for llama3-8b-8192, multi-qa-mpnet-base-dot-v1</h3>
+
+            <div class="metrics">
+                <div class="metric-box">
+                    <h4>Average Scores</h4>
+                    <p>SAGE: 0.00/10</p>
+                    <p>Traditional: 0.00/10</p>
+                </div>
+
+                <div class="metric-box">
+                    <h4>Better System Counts</h4>
+                    <p>SAGE better: 0</p>
+                    <p>Traditional better: 0</p>
+                    <p>Tie: 0</p>
+                </div>
+
+                <div class="metric-box">
+                    <h4>Average Latency</h4>
+                    <p>SAGE: 2.43s</p>
+                    <p>Traditional: 1.04s</p>
+                </div>
+            </div>
+
+            <h4>Query Results</h4>
+            <table>
+                <tr>
+                    <th>Query</th>
+                    <th>SAGE Answer</th>
+                    <th>Traditional Answer</th>
+                    <th>Better System</th>
+                    <th>SAGE Score</th>
+                    <th>Traditional Score</th>
+                </tr>
+        
+                <tr>
+                    <td><think>
+Okay, so the user provided a document in J...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a specific que...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a specific que...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to figure out a question a...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, so I need to generate a question abo...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+                <tr>
+                    <td><think>
+Okay, I need to generate a question about ...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td class="">Error generating response: Error code: 400 - {'error': {'message': 'Organization has been restricted...</td>
+                    <td>Tie</td>
+                    <td>0</td>
+                    <td>0</td>
+                </tr>
+            
+            </table>
+        </div>
+        
+    </body>
+    </html>
+    
