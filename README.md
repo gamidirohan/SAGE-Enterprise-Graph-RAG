@@ -1,10 +1,5 @@
 # SAGE Enterprise Graph RAG
-
-<<<<<<< 1-final-update
-SAGE (Structured Augmented Generation Engine) is an enterprise-grade system that combines knowledge graphs with Retrieval-Augmented Generation (RAG) to provide more accurate and comprehensive answers to natural language queries. This project extracts structured data from unstructured documents (PDFs, text files, messages), stores it in a Neo4j knowledge graph, and enables natural language querying with multi-hop reasoning.
-=======
-This is a **<*conpleted*>** personal project aimed at building a pipeline to extract structured data from **unstructured PDFs**, store it in a **Neo4j knowledge graph**, and enable **natural language querying** using a **Retrieval-Augmented Generation (RAG) approach**.
->>>>>>> main
+SAGE (Structured Augmented Generation Engine) is a completed personal project designed as an enterprise-grade system that extracts structured data from unstructured documents (PDFs, text files, messages), stores it in a Neo4j knowledge graph, and enables natural language querying using a Retrieval-Augmented Generation (RAG) approach with multi-hop reasoning to provide more accurate and comprehensive answers.
 
 The project is inspired by:
 - [Neo4J - Enhancing the Accuracy of RAG Applications With Knowledge Graphs](https://neo4j.com/developer-blog/enhance-rag-knowledge-graph/?mkt_tok=NzEwLVJSQy0zMzUAAAGTBn-WDr1KcupEPExYL6rh_DaP3R0h5gWQFxWGRm6dXiew5-oAnYBbvXvedknjyhyojNebyUa0ywWZwIkZQRtiJ-9x6k22vY3ru2Ztp7PjlgN5Bbs)
