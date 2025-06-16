@@ -9,3 +9,13 @@ langchain-community
 streamlit
 langchain_core
 pydantic
+fastapi
+uvicorn
+python-multipart
+sentence-transformers
+nltk
+numpy
+bert-score
+rouge
+pandas
+matplotlib

@@ -1,0 +1,17 @@
+[
+  {
+    "question": "Who texted Fiona within the last hour of 2:52 pm on April 19, 2025?",
+    "answer": "There is no information available about who texted Fiona within the last hour of 2:52 pm on April 19, 2025. All relevant messages fall outside this time frame.",
+    "context": "A message in JSON format indicating no information is available about who texted Fiona within the last hour of 2:52 pm on April 19, 2025."
+  },
+  {
+    "question": "What is the message from Sender ID 1 to Receiver ID 'sage' about regarding the deputy manager?",
+    "answer": "The provided context does not contain any information about a message from Sender ID 1 to Receiver ID 'sage' regarding a deputy manager. The messages within the context discuss Fiona's leave and clarifications about her absence, with no mention of a deputy manager.",
+    "context": "A JSON-formatted message from Sender ID 1 to Receiver ID 'sage', asking about Fiona's leave and clarifications about her absence."
+  },
+  {
+    "question": "What does the message from Sender ID 1 to Receiver 'sage' on 2025-04-13 request regarding Project Phoenix?",
+    "answer": "There is no information about Project Phoenix in the provided context. The context discusses internal communications regarding Fiona's leave and other messages but does not mention Project Phoenix.",
+    "context": "A JSON-formatted message from Sender ID 1 to Receiver ID 'sage', discussing internal communications about Fiona's leave."
+  }
+]
