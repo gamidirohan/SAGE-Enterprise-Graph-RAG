@@ -257,6 +257,10 @@ git push origin graph_rag_backend_for_nextjs
 
 ---
 
+![Document Processing and Knowledge Graph](https://github.com/user-attachments/assets/80171c2e-a4f6-48ad-b858-1c622417be70)
+![QA Workflow Mermaid Diagram](https://github.com/user-attachments/assets/3d79de7f-0fc1-4d5a-b8e3-c1c424661aad)
+
+
 ## 🌟 Project Status and Roadmap
 
 ### ✅ Completed Features
