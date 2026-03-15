@@ -12,7 +12,7 @@ The script also compares different:
 - Embedding models (sentence-transformers, etc.)
 
 Usage:
-    python performance_comparison.py [--queries QUERIES_FILE] [--output OUTPUT_FILE] [--models MODEL1,MODEL2,...]
+    python scripts/performance_comparison.py [--queries QUERIES_FILE] [--output OUTPUT_FILE] [--models MODEL1,MODEL2,...]
 """
 
 import os
@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional, Union
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
@@ -49,12 +50,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+
 # Load environment variables
-load_dotenv()
+load_dotenv(ROOT_DIR / ".env")
 NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USER = os.getenv("NEO4J_USERNAME")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
-GROQ_API_KEY = "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" or os.getenv("GROQ_API_KEY")
+NEO4J_USER = os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_Password")
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+DATA_DIR = ROOT_DIR / "data"
+EVAL_DIR = DATA_DIR / "eval"
+UPLOADS_DIR = DATA_DIR / "uploads"
+RESULTS_DIR = ROOT_DIR / "results"
 
 # Available models
 AVAILABLE_LLM_MODELS = {
@@ -144,9 +153,9 @@ DEFAULT_TEST_QUERIES = [
 ]
 
 # Try to load QA pairs if available
-QA_PAIRS_FILE = "qa_pairs.json"
+QA_PAIRS_FILE = EVAL_DIR / "qa_pairs.json"
 try:
-    if os.path.exists(QA_PAIRS_FILE):
+    if QA_PAIRS_FILE.exists():
         with open(QA_PAIRS_FILE, 'r', encoding='utf-8') as f:
             qa_pairs = json.load(f)
         DEFAULT_TEST_QUERIES = [pair["question"] for pair in qa_pairs[:10]]
@@ -200,10 +209,16 @@ class SAGEGraphRAG(RAGSystem):
 
     def __init__(self, llm_model: str = "deepseek-r1-distill-llama-70b", embedding_model: str = "all-mpnet-base-v2"):
         super().__init__(f"SAGE Graph RAG ({llm_model}, {embedding_model})", llm_model, embedding_model)
+        self.neo4j_database = NEO4J_DATABASE
         self.driver = GraphDatabase.driver(
             NEO4J_URI,
             auth=(NEO4J_USER, NEO4J_PASSWORD)
         )
+
+    def _session(self):
+        if self.neo4j_database:
+            return self.driver.session(database=self.neo4j_database)
+        return self.driver.session()
 
     def query(self, question: str) -> Dict[str, Any]:
         """Query the SAGE system using graph-based RAG"""
@@ -235,7 +250,7 @@ class SAGEGraphRAG(RAGSystem):
             query_embedding = np.array(query_embedding, dtype=np.float32)
 
             results = []
-            with self.driver.session() as session:
+            with self._session() as session:
                 # Step 1: Find initial chunks based on vector similarity
                 initial_query = """
                     MATCH (c:Chunk)-[:PART_OF]->(d:Document)
@@ -609,18 +624,24 @@ class TraditionalRAG(RAGSystem):
 
     def __init__(self, llm_model: str = "deepseek-r1-distill-llama-70b", embedding_model: str = "all-mpnet-base-v2"):
         super().__init__(f"Traditional RAG ({llm_model}, {embedding_model})", llm_model, embedding_model)
+        self.neo4j_database = NEO4J_DATABASE
         self.driver = GraphDatabase.driver(
             NEO4J_URI,
             auth=(NEO4J_USER, NEO4J_PASSWORD)
         )
         self.documents = self._load_documents()
 
+    def _session(self):
+        if self.neo4j_database:
+            return self.driver.session(database=self.neo4j_database)
+        return self.driver.session()
+
     def _load_documents(self) -> List[Dict[str, Any]]:
         """Load documents from Neo4j but without using graph relationships"""
         documents = []
 
         try:
-            with self.driver.session() as session:
+            with self._session() as session:
                 # Get all chunks with their embeddings
                 result = session.run("""
                     MATCH (c:Chunk)
@@ -685,7 +706,7 @@ class TraditionalRAG(RAGSystem):
         top_docs = [doc for doc, _ in similarities[:top_k]]
 
         # Add basic document metadata from Neo4j
-        with self.driver.session() as session:
+        with self._session() as session:
             for doc in top_docs:
                 chunk_id = doc.get("id")
                 if chunk_id:
@@ -1009,9 +1030,12 @@ def run_comparison(
 
     # Save all results if output file specified
     if output_file:
-        with open(output_file, 'w') as f:
+        output_path = Path(output_file)
+        if not output_path.is_absolute():
+            output_path = ROOT_DIR / output_path
+        with open(output_path, 'w') as f:
             json.dump(all_results, f, indent=2)
-        logger.info(f"All results saved to {output_file}")
+        logger.info(f"All results saved to {output_path}")
 
     # Generate overall summary statistics
     generate_summary(all_results, "overall")
@@ -1090,7 +1114,7 @@ def create_visualizations(results: List[Dict[str, Any]], prefix: str = ""):
         return
 
     # Create output directory if it doesn't exist
-    os.makedirs("results", exist_ok=True)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
 
     # Extract data
     queries = [r["query"] for r in results]
@@ -1118,7 +1142,7 @@ def create_visualizations(results: List[Dict[str, Any]], prefix: str = ""):
     })
 
     # Save DataFrame to CSV
-    csv_filename = f"results/performance_data{model_info if prefix == '' else '_' + prefix}.csv"
+    csv_filename = RESULTS_DIR / f"performance_data{model_info if prefix == '' else '_' + prefix}.csv"
     df.to_csv(csv_filename, index=False)
     logger.info(f"Performance data saved to {csv_filename}")
 
@@ -1149,7 +1173,7 @@ def create_visualizations(results: List[Dict[str, Any]], prefix: str = ""):
     ax2.legend()
 
     plt.tight_layout()
-    plt.savefig(f"results/performance_comparison{model_info if prefix == '' else '_' + prefix}.png")
+    plt.savefig(RESULTS_DIR / f"performance_comparison{model_info if prefix == '' else '_' + prefix}.png")
     plt.close()
 
     # 2. Create a scatter plot of score vs latency
@@ -1171,7 +1195,7 @@ def create_visualizations(results: List[Dict[str, Any]], prefix: str = ""):
     plt.title(f'Score vs Latency{" - " + prefix if prefix else ""}')
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.savefig(f"results/score_vs_latency{model_info if prefix == '' else '_' + prefix}.png")
+    plt.savefig(RESULTS_DIR / f"score_vs_latency{model_info if prefix == '' else '_' + prefix}.png")
     plt.close()
 
     # 3. Create a histogram of score differences
@@ -1183,7 +1207,7 @@ def create_visualizations(results: List[Dict[str, Any]], prefix: str = ""):
     plt.ylabel('Frequency')
     plt.title(f'Distribution of Score Differences{" - " + prefix if prefix else ""}')
     plt.grid(True, alpha=0.3)
-    plt.savefig(f"results/score_differences{model_info if prefix == '' else '_' + prefix}.png")
+    plt.savefig(RESULTS_DIR / f"score_differences{model_info if prefix == '' else '_' + prefix}.png")
     plt.close()
 
     # 4. Create a heatmap of scores by query
@@ -1197,7 +1221,7 @@ def create_visualizations(results: List[Dict[str, Any]], prefix: str = ""):
         sns.heatmap(heatmap_data, annot=True, cmap="YlGnBu", vmin=0, vmax=10)
         plt.title(f'Score Heatmap by Query{" - " + prefix if prefix else ""}')
         plt.tight_layout()
-        plt.savefig(f"results/score_heatmap{model_info if prefix == '' else '_' + prefix}.png")
+        plt.savefig(RESULTS_DIR / f"score_heatmap{model_info if prefix == '' else '_' + prefix}.png")
         plt.close()
 
     logger.info(f"Visualizations saved to results/ directory with prefix {prefix if prefix else 'performance_comparison'}")
@@ -1213,17 +1237,17 @@ def main():
     parser.add_argument('--evaluation-model', type=str, default="deepseek-r1-distill-llama-70b",
                         help='Model to use for evaluation')
     parser.add_argument('--process-messages', action='store_true',
-                        help='Process messages from uploads folder before running comparison')
+                        help='Process messages from data/uploads before running comparison')
     parser.add_argument('--generate-qa', action='store_true',
                         help='Generate new QA pairs before running comparison')
     args = parser.parse_args()
 
     # Process messages if requested
     if args.process_messages:
-        logger.info("Processing messages from uploads folder...")
+        logger.info("Processing messages from data/uploads...")
         try:
             from message_processor import process_message_files
-            processed_data = process_message_files("uploads")
+            processed_data = process_message_files(str(UPLOADS_DIR))
             logger.info(f"Processed {len(processed_data)} message files.")
         except Exception as e:
             logger.error(f"Error processing messages: {str(e)}")
@@ -1234,7 +1258,7 @@ def main():
         try:
             from message_processor import generate_qa_pairs, save_qa_pairs
             qa_pairs = generate_qa_pairs(num_pairs=30)
-            save_qa_pairs(qa_pairs, "qa_pairs.json")
+            save_qa_pairs(qa_pairs, str(QA_PAIRS_FILE))
             logger.info(f"Generated {len(qa_pairs)} question-answer pairs.")
         except Exception as e:
             logger.error(f"Error generating QA pairs: {str(e)}")
@@ -1242,7 +1266,10 @@ def main():
     # Load queries
     if args.queries:
         try:
-            with open(args.queries, 'r') as f:
+            queries_path = Path(args.queries)
+            if not queries_path.is_absolute():
+                queries_path = ROOT_DIR / queries_path
+            with open(queries_path, 'r') as f:
                 queries = json.load(f)
                 if isinstance(queries, list) and all(isinstance(q, dict) for q in queries):
                     # If the queries file contains QA pairs
@@ -1265,7 +1292,7 @@ def main():
         logger.info(f"Testing with embedding models: {embedding_models}")
 
     # Create results directory if it doesn't exist
-    os.makedirs("results", exist_ok=True)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
 
     # Run comparison
     run_comparison(

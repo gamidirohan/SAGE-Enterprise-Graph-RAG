@@ -1,4 +1,4 @@
-# SAGE Enterprise Graph RAG
+﻿# SAGE Enterprise Graph RAG
 SAGE (Self Adaptive Graph RAG for Enterprises) is a completed personal project designed as an enterprise-grade system that extracts structured data from unstructured documents (PDFs, text files, messages), stores it in a Neo4j knowledge graph, and enables natural language querying using a Retrieval-Augmented Generation (RAG) approach with multi-hop reasoning to provide more accurate and comprehensive answers.
 
 The project is inspired by:
@@ -8,49 +8,47 @@ The project is inspired by:
 
 ---
 
-## 🚀 How to Run
+## ðŸš€ How to Run
 
-### **1️⃣ Prerequisites**
+### **1ï¸âƒ£ Prerequisites**
 Ensure you have:
-✅ [Neo4j](https://neo4j.com/download/) installed and running locally
-✅ Python environment set up (`Python 3.8+`)
-✅ [Groq API key](https://console.groq.com/) for LLM access
+âœ… AuraDB credentials exported to `Neo4j-508b20fd-Created-2026-02-25.txt`
+âœ… Python environment set up (`Python 3.9+`) and `uv` installed
+âœ… [Groq API key](https://console.groq.com/) for LLM access
 
-### **2️⃣ Install dependencies**
+### **2ï¸âƒ£ Install dependencies**
 ```bash
-pip install -r requirements.txt
+uv venv .venv
+uv sync
 ```
 
-### **3️⃣ Create a `.env` file with credentials**
-```ini
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=password
-GROQ_API_KEY=gsk_your_groq_api_key_here
+### **3ï¸âƒ£ Create a `.env` file with credentials**
+```powershell
+Copy-Item -Force "Neo4j-508b20fd-Created-2026-02-25.txt" ".env"
 ```
 
-### **4️⃣ Project Components**
+### **4ï¸âƒ£ Project Components**
 
 | File | Description |
 |------|-------------|
 | `backend.py` | FastAPI backend server for SAGE Graph RAG |
-| `message_processor.py` | Processes message files and generates QA pairs |
-| `pipeline.py` | Processes PDF documents and extracts structured data |
+| `scripts/message_processor.py` | Processes message files and generates QA pairs |
+| `scripts/pipeline.py` | Processes PDF documents and extracts structured data |
 | `graph_rag.py` | Core graph-based RAG implementation |
-| `performance_comparison.py` | Framework for comparing SAGE vs traditional RAG |
-| `generate_report.py` | Generates performance reports with visualizations |
-| `run_performance_comparison.py` | Script to run performance comparisons |
-| `qa_pairs.json` | Sample question-answer pairs for testing |
-| `test_queries.json` | Test queries for performance evaluation |
+| `scripts/performance_comparison.py` | Framework for comparing SAGE vs traditional RAG |
+| `scripts/generate_report.py` | Generates performance reports with visualizations |
+| `scripts/run_performance_comparison.py` | Script to run performance comparisons |
+| `data/eval/qa_pairs.json` | Sample question-answer pairs for testing |
+| `data/eval/test_queries.json` | Test queries for performance evaluation |
 
 ---
 
-## 📌 Data Processing Pipeline
+## ðŸ“Œ Data Processing Pipeline
 
-### Document Processing (`pipeline.py`)
+### Document Processing (`scripts/pipeline.py`)
 The pipeline processes documents (PDFs, text files) and extracts structured data for the knowledge graph:
 
-1. **Text Extraction**: Extracts text from PDFs in the `files/` folder using PyPDF2
+1. **Text Extraction**: Extracts text from PDFs in `data/documents/` (Streamlit demo defaults to `data/documents_ui/`)
 2. **Entity Extraction**: Uses LLM (DeepSeek R1 Distill Llama-70B) to identify:
    - People, organizations, locations
    - Projects, tasks, deadlines
@@ -59,30 +57,30 @@ The pipeline processes documents (PDFs, text files) and extracts structured data
 4. **Document Chunking**: Splits documents into semantic chunks for better retrieval
 5. **Graph Storage**: Stores all extracted data in Neo4j with proper relationships
 
-#### **🛠 Run the Document Pipeline**
+#### **ðŸ›  Run the Document Pipeline**
 ```bash
-python pipeline.py
+uv run python scripts/pipeline.py
 ```
 
-### Message Processing (`message_processor.py`)
+### Message Processing (`scripts/message_processor.py`)
 The message processor handles chat messages and conversation data:
 
-1. **Message Extraction**: Processes message files from the `uploads/` directory
+1. **Message Extraction**: Processes message files from the `data/uploads/` directory
 2. **Structured Data Extraction**: Extracts sender, receiver, content, and metadata
 3. **Graph Integration**: Adds messages to the knowledge graph with proper relationships
 4. **QA Pair Generation**: Creates question-answer pairs for testing and evaluation
 
-#### **🛠 Run the Message Processor**
+#### **ðŸ›  Run the Message Processor**
 ```bash
-python message_processor.py --directory uploads
+uv run python scripts/message_processor.py --directory data/uploads
 ```
 
 To process messages and generate QA pairs:
 ```bash
-python message_processor.py --directory uploads --num-pairs 30 --output qa_pairs.json
+uv run python scripts/message_processor.py --directory data/uploads --num-pairs 30 --output data/eval/qa_pairs.json
 ```
 
-### **🕵️‍♂️ Verify Neo4j Data**
+### **ðŸ•µï¸â€â™‚ï¸ Verify Neo4j Data**
 After running the pipelines, check stored entities & relationships:
 ```cypher
 MATCH (n)-[r]->(m)
@@ -92,7 +90,7 @@ Visit [http://localhost:7474/browser/](http://localhost:7474/browser/) to visual
 
 ---
 
-## 📖 SAGE Graph RAG Backend
+## ðŸ“– SAGE Graph RAG Backend
 
 ### SAGE Architecture
 
@@ -114,7 +112,7 @@ The backend provides a FastAPI server with endpoints for:
 - Graph debugging and visualization
 
 ```bash
-python backend.py
+uv run python backend.py
 ```
 
 This will start the FastAPI backend server on http://localhost:8000 with the following endpoints:
@@ -123,9 +121,9 @@ This will start the FastAPI backend server on http://localhost:8000 with the fol
 - `/api/debug-graph` - Get information about the graph structure
 - `/api/health` - Health check endpoint
 
-## 📊 Performance Comparison Framework
+## ðŸ“Š Performance Comparison Framework
 
-### Performance Comparison (`performance_comparison.py`)
+### Performance Comparison (`scripts/performance_comparison.py`)
 
 The performance comparison framework evaluates SAGE Graph RAG against traditional RAG approaches using various metrics and models.
 
@@ -139,17 +137,17 @@ The performance comparison framework evaluates SAGE Graph RAG against traditiona
 
 1. **Basic Comparison**
    ```bash
-   python performance_comparison.py --queries qa_pairs.json --output results/comparison_results.json --llm-models "llama3-8b-8192" --embedding-models "all-mpnet-base-v2"
+   uv run python scripts/performance_comparison.py --queries data/eval/qa_pairs.json --output results/comparison_results.json --llm-models "llama3-8b-8192" --embedding-models "all-mpnet-base-v2"
    ```
 
 2. **Multi-Model Comparison**
    ```bash
-   python performance_comparison.py --queries qa_pairs.json --output results/multi_model_results.json --llm-models "gemma2-9b-it,llama3-8b-8192,llama3-70b-8192" --embedding-models "all-mpnet-base-v2,multi-qa-mpnet-base-dot-v1"
+   uv run python scripts/performance_comparison.py --queries data/eval/qa_pairs.json --output results/multi_model_results.json --llm-models "gemma2-9b-it,llama3-8b-8192,llama3-70b-8192" --embedding-models "all-mpnet-base-v2,multi-qa-mpnet-base-dot-v1"
    ```
 
-3. **Generate Performance Report** (`generate_report.py`)
+3. **Generate Performance Report** (`scripts/generate_report.py`)
    ```bash
-   python generate_report.py --results results/comparison_results.json --output results/performance_report.html
+   uv run python scripts/generate_report.py --results results/comparison_results.json --output results/performance_report.html
    ```
 
 ### Performance Metrics
@@ -187,12 +185,12 @@ For convenience, we've included batch files to run the performance comparison pi
 
 1. **Quick Comparison** (single model, 10 questions)
    ```bash
-   run_quick_comparison.bat
+   scripts\run_quick_comparison.bat
    ```
 
 2. **Comprehensive Comparison** (recommended)
    ```bash
-   run_comprehensive_comparison.bat
+   scripts\run_comprehensive_comparison.bat
    ```
    This batch file runs a complete evaluation with multiple models and generates detailed reports with visualizations.
 
@@ -202,22 +200,22 @@ To run the complete pipeline from data processing to performance evaluation:
 
 1. Process message files:
    ```bash
-   python message_processor.py --directory uploads --skip-qa
+   uv run python scripts/message_processor.py --directory data/uploads --skip-qa
    ```
 
 2. Generate QA pairs:
    ```bash
-   python message_processor.py --skip-processing --num-pairs 30
+   uv run python scripts/message_processor.py --skip-processing --num-pairs 30
    ```
 
 3. Run performance comparison:
    ```bash
-   python performance_comparison.py --queries qa_pairs.json --output results/comparison_results.json
+   uv run python scripts/performance_comparison.py --queries data/eval/qa_pairs.json --output results/comparison_results.json
    ```
 
 4. Generate report:
    ```bash
-   python generate_report.py --results results/comparison_results.json
+   uv run python scripts/generate_report.py --results results/comparison_results.json
    ```
 
 ### Sample Results
@@ -231,16 +229,16 @@ Our optimized SAGE Graph RAG with llama-3.3-70b-versatile and multi-qa-mpnet-bas
 
 ---
 
-## 🛠 GitHub Workflow
+## ðŸ›  GitHub Workflow
 
-### **📌 First-time setup**
+### **ðŸ“Œ First-time setup**
 ```bash
 git init
 git remote add origin https://github.com/gamidirohan/SAGE-Enterprise-Graph-RAG.git
 git branch -M main
 ```
 
-### **📌 Development Workflow**
+### **ðŸ“Œ Development Workflow**
 ```bash
 # Pull latest changes
 git pull origin graph_rag_backend_for_nextjs
@@ -261,9 +259,9 @@ git push origin graph_rag_backend_for_nextjs
 ![QA Workflow Mermaid Diagram](https://github.com/user-attachments/assets/3d79de7f-0fc1-4d5a-b8e3-c1c424661aad)
 
 
-## 🌟 Project Status and Roadmap
+## ðŸŒŸ Project Status and Roadmap
 
-### ✅ Completed Features
+### âœ… Completed Features
 - **Backend API**: FastAPI backend with comprehensive endpoints for chat, document processing, and graph debugging
 - **Document Processing**: Pipeline for extracting structured data from PDFs and text files
 - **Message Processing**: System for handling chat messages and generating QA pairs
@@ -272,13 +270,13 @@ git push origin graph_rag_backend_for_nextjs
 - **Multi-model Support**: Integration with various LLM and embedding models via Groq API
 - **Visualization**: Comprehensive reporting with graphs and heatmaps
 
-### 🔄 In Progress
+### ðŸ”„ In Progress
 - **Frontend Integration**: Connecting the backend with a NextJS frontend
 - **Real-time Updates**: Implementing WebSocket for real-time chat updates
 - **Conversation History**: Adding support for follow-up questions and context retention
 - **Advanced Entity Extraction**: Improving entity and relationship extraction accuracy
 
-### 🔮 Future Roadmap
+### ðŸ”® Future Roadmap
 - **Automated Knowledge Graph Expansion**: Dynamically expanding the graph based on user queries
 - **Custom Embedding Models**: Training domain-specific embedding models
 - **Explainability Features**: Visualizing reasoning paths in the graph
@@ -286,3 +284,5 @@ git push origin graph_rag_backend_for_nextjs
 - **Enterprise Integration**: Connecting with enterprise data sources and authentication systems
 
 ---
+
+

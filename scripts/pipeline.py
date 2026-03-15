@@ -10,18 +10,28 @@ from sentence_transformers import SentenceTransformer
 from PyPDF2 import PdfReader
 import nltk
 from nltk.tokenize import sent_tokenize, word_tokenize
+from pathlib import Path
 
 nltk.download('punkt')
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+
 # Load Neo4j credentials from .env
-load_dotenv()
+load_dotenv(ROOT_DIR / ".env")
 NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USER = os.getenv("NEO4J_USERNAME")  # Updated from NEO4J_USER to NEO4J_USERNAME
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+NEO4J_USER = os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_Password")
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE")
 
 # Initialize Neo4j connection
 def get_neo4j_driver():
     return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+
+def get_session(driver):
+    if NEO4J_DATABASE:
+        return driver.session(database=NEO4J_DATABASE)
+    return driver.session()
 
 # Initialize embedding model
 @st.cache_resource
@@ -46,20 +56,26 @@ st.set_page_config(page_title="Document Processor", layout="wide")
 st.title("Document Processor")
 
 # File selection from directory
-files_dir = "files1"  # Directory containing files
-file_names = [f for f in os.listdir(files_dir) if f.endswith(('.txt', '.pdf'))]
+data_dir = ROOT_DIR / "data"
+docs_ui_dir = data_dir / "documents_ui"
+docs_dir = data_dir / "documents"
+
+files_dir = docs_ui_dir if docs_ui_dir.exists() else docs_dir
+file_names = []
+if files_dir.exists():
+    file_names = [p.name for p in files_dir.iterdir() if p.suffix.lower() in ('.txt', '.pdf')]
 
 if not file_names:
     st.warning(f"No .txt or .pdf files found in directory: {files_dir}")
 else:
     selected_file = st.selectbox("Select a file:", file_names)
-    file_path = os.path.join(files_dir, selected_file)
+    file_path = files_dir / selected_file
 
     if st.button("Process Document"):
         if selected_file:
             try:
                 if selected_file.endswith('.pdf'):
-                    document_text = extract_text_from_pdf(file_path)
+                    document_text = extract_text_from_pdf(str(file_path))
                 elif selected_file.endswith('.txt'):
                     with open(file_path, 'r', encoding='utf-8') as f:
                         document_text = f.read()
@@ -138,7 +154,7 @@ else:
                 def store_in_neo4j(data, document_text):
                     driver = get_neo4j_driver()
                     llm = ChatGroq(model_name="deepseek-r1-distill-llama-70b", temperature=0.0, model_kwargs={"response_format": {"type": "json_object"}})
-                    with driver.session() as session:
+                    with get_session(driver) as session:
                         # Create Document node
                         document_summary = llm.invoke(f"Summarize this document, include the word json in the summary: {document_text}").content
                         embedding = generate_embedding(document_summary[:5000])

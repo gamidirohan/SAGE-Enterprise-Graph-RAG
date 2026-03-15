@@ -2,7 +2,7 @@
 Message Processor for SAGE Enterprise Graph RAG
 
 This script:
-1. Processes message files from the files1 directory
+1. Processes message files from the data/uploads directory
 2. Extracts structured data from each message
 3. Pushes the data to the Neo4j database
 4. Generates question-answer pairs for evaluation
@@ -12,7 +12,9 @@ import os
 import json
 import hashlib
 import logging
+import sys
 from typing import List, Dict, Any, Tuple
+from pathlib import Path
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 from sentence_transformers import SentenceTransformer
@@ -34,16 +36,32 @@ logger = logging.getLogger(__name__)
 # Download NLTK data
 nltk.download('punkt', quiet=True)
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.append(str(ROOT_DIR))
+
 # Load environment variables
-load_dotenv()
+load_dotenv(ROOT_DIR / ".env")
 NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USER = os.getenv("NEO4J_USERNAME")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+NEO4J_USER = os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_Password")
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+DATA_DIR = ROOT_DIR / "data"
+UPLOADS_DIR = DATA_DIR / "uploads"
+EVAL_DIR = DATA_DIR / "eval"
+DEFAULT_QA_OUTPUT = EVAL_DIR / "qa_pairs.json"
 
 # Initialize Neo4j connection
 def get_neo4j_driver():
     return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+
+def get_session(driver):
+    if NEO4J_DATABASE:
+        return driver.session(database=NEO4J_DATABASE)
+    return driver.session()
 
 # Initialize embedding model
 def get_embedding_model():
@@ -153,7 +171,7 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
     )
 
     try:
-        with driver.session() as session:
+        with get_session(driver) as session:
             # First, check if document already exists
             result = session.run(
                 """
@@ -225,6 +243,12 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
                 )
 
             logger.info(f"Successfully stored document {data['doc_id']} in Neo4j.")
+            # Trigger SAIA to adjust existing knowledge given this new document
+            try:
+                import saia as _saia
+                _saia.trigger_saia(data["doc_id"], data["content"])
+            except Exception as e:
+                logger.error(f"SAIA trigger error for {data['doc_id']}: {str(e)}")
             return True
     except Exception as e:
         logger.error(f"Error storing document in Neo4j: {str(e)}")
@@ -236,12 +260,18 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
 def process_message_files(directory: str) -> List[Dict[str, Any]]:
     """Process all message files in the specified directory."""
     processed_data = []
+    directory_path = Path(directory)
+    if not directory_path.is_absolute():
+        directory_path = ROOT_DIR / directory_path
 
     # Get all text files in the directory
-    file_paths = [os.path.join(directory, f) for f in os.listdir(directory)
-                 if f.endswith('.txt') and os.path.isfile(os.path.join(directory, f))]
+    if not directory_path.exists():
+        logger.error(f"Directory does not exist: {directory_path}")
+        return processed_data
 
-    logger.info(f"Found {len(file_paths)} message files in {directory}")
+    file_paths = [str(p) for p in directory_path.iterdir() if p.suffix.lower() == ".txt" and p.is_file()]
+
+    logger.info(f"Found {len(file_paths)} message files in {directory_path}")
 
     # Process files in batches to avoid overwhelming the database
     batch_size = 10
@@ -280,7 +310,7 @@ def generate_qa_pairs(num_pairs: int = 30) -> List[Dict[str, str]]:
     qa_pairs = []
 
     try:
-        with driver.session() as session:
+        with get_session(driver) as session:
             # Get all documents
             documents = session.run(
                 """
@@ -416,12 +446,16 @@ def generate_qa_pairs(num_pairs: int = 30) -> List[Dict[str, str]]:
         driver.close()
 
 # Function to save QA pairs to a file
-def save_qa_pairs(qa_pairs: List[Dict[str, str]], output_file: str = "qa_pairs.json"):
+def save_qa_pairs(qa_pairs: List[Dict[str, str]], output_file: str = str(DEFAULT_QA_OUTPUT)):
     """Save question-answer pairs to a JSON file."""
     try:
-        with open(output_file, 'w', encoding='utf-8') as f:
+        output_path = Path(output_file)
+        if not output_path.is_absolute():
+            output_path = ROOT_DIR / output_path
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(qa_pairs, f, indent=2)
-        logger.info(f"Successfully saved {len(qa_pairs)} QA pairs to {output_file}")
+        logger.info(f"Successfully saved {len(qa_pairs)} QA pairs to {output_path}")
         return True
     except Exception as e:
         logger.error(f"Error saving QA pairs to {output_file}: {str(e)}")
@@ -434,9 +468,9 @@ def main():
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Process messages and generate QA pairs")
-    parser.add_argument("--directory", type=str, default="uploads", help="Directory containing message files")
+    parser.add_argument("--directory", type=str, default=str(UPLOADS_DIR), help="Directory containing message files")
     parser.add_argument("--num-pairs", type=int, default=30, help="Number of QA pairs to generate")
-    parser.add_argument("--output", type=str, default="qa_pairs.json", help="Output file for QA pairs")
+    parser.add_argument("--output", type=str, default=str(DEFAULT_QA_OUTPUT), help="Output file for QA pairs")
     parser.add_argument("--skip-processing", action="store_true", help="Skip message processing")
     parser.add_argument("--skip-qa", action="store_true", help="Skip QA pair generation")
     args = parser.parse_args()

@@ -8,17 +8,27 @@ import re
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parent
 
 # Load environment variables
-load_dotenv()
+load_dotenv(ROOT_DIR / ".env")
 NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USER = os.getenv("NEO4J_USERNAME")  # Updated from NEO4J_USER to NEO4J_USERNAME
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+NEO4J_USER = os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_Password")
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Initialize Neo4j connection
 def get_neo4j_driver():
     return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+
+def get_neo4j_session(driver):
+    if NEO4J_DATABASE:
+        return driver.session(database=NEO4J_DATABASE)
+    return driver.session()
 
 # Initialize embedding model
 @st.cache_resource
@@ -63,7 +73,7 @@ if st.checkbox("Debug Graph Structure"):
     with st.spinner("Analyzing graph structure..."):
         driver = get_neo4j_driver()
         try:
-            with driver.session() as session:
+            with get_neo4j_session(driver) as session:
                 node_counts = session.run("""
                     MATCH (n) 
                     RETURN labels(n)[0] AS Label, count(*) AS Count
@@ -134,7 +144,7 @@ def query_graph(user_input):
     query_embedding = np.array(query_embedding, dtype=np.float32)
 
     results = []
-    with driver.session() as session:
+    with get_neo4j_session(driver) as session:
         try:
             vector_query = """
                 MATCH (c:Chunk)-[:PART_OF]->(d:Document)

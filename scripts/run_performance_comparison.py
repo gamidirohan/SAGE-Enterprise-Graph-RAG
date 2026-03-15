@@ -8,14 +8,25 @@ import json
 import argparse
 import subprocess
 from datetime import datetime
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = ROOT_DIR / "scripts"
+RESULTS_DIR = ROOT_DIR / "results"
 
 def run_tests():
     """Run the test script to check if everything is set up correctly"""
+    test_script = SCRIPTS_DIR / "test_performance_comparison.py"
+    if not test_script.exists():
+        print("No test script found. Skipping tests.")
+        return True
+
     print("Running tests to check if everything is set up correctly...")
     result = subprocess.run(
-        [sys.executable, "test_performance_comparison.py"],
+        [sys.executable, str(test_script)],
         capture_output=True,
-        text=True
+        text=True,
+        cwd=str(ROOT_DIR)
     )
     
     if "All tests passed!" in result.stdout:
@@ -29,13 +40,13 @@ def run_tests():
 def run_comparison(queries_file=None, output_file=None, skip_tests=False):
     """Run the performance comparison"""
     # Create output directory if it doesn't exist
-    os.makedirs("results", exist_ok=True)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
     
     # Generate default filenames based on timestamp if not provided
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     if not output_file:
-        output_file = f"results/comparison_results_{timestamp}.json"
+        output_file = str(RESULTS_DIR / f"comparison_results_{timestamp}.json")
     
     # Run tests if not skipped
     if not skip_tests:
@@ -43,7 +54,7 @@ def run_comparison(queries_file=None, output_file=None, skip_tests=False):
             return False
     
     # Build command
-    cmd = [sys.executable, "performance_comparison.py"]
+    cmd = [sys.executable, str(SCRIPTS_DIR / "performance_comparison.py")]
     
     if queries_file:
         cmd.extend(["--queries", queries_file])
@@ -54,7 +65,7 @@ def run_comparison(queries_file=None, output_file=None, skip_tests=False):
     print(f"Running performance comparison...")
     print(f"Command: {' '.join(cmd)}")
     
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, cwd=str(ROOT_DIR))
     
     if result.returncode == 0:
         print(f"Performance comparison completed successfully!")
@@ -68,11 +79,15 @@ def run_comparison(queries_file=None, output_file=None, skip_tests=False):
 def generate_html_report(results_file):
     """Generate an HTML report from the JSON results file"""
     try:
-        with open(results_file, 'r') as f:
+        results_path = Path(results_file)
+        if not results_path.is_absolute():
+            results_path = ROOT_DIR / results_path
+
+        with open(results_path, 'r') as f:
             results = json.load(f)
         
         # Create HTML report filename
-        html_file = results_file.replace('.json', '.html')
+        html_file = str(results_path).replace('.json', '.html')
         
         # Calculate summary statistics
         sage_scores = [r["llm_evaluation"].get("system1_score", 0) for r in results]
@@ -208,7 +223,7 @@ def main():
     
     if success and args.html:
         # Generate HTML report
-        output_file = args.output or f"results/comparison_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        output_file = args.output or str(RESULTS_DIR / f"comparison_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
         generate_html_report(output_file)
 
 if __name__ == "__main__":

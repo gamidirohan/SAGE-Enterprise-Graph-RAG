@@ -4,19 +4,21 @@
 myenv/
 venv/
 ENV/
+.venv/
 
 # Python cache files
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache
 
 # Uploaded files
-uploads/*
-!uploads/.gitkeep
+data/uploads/*
+!data/uploads/.gitkeep
 
 # Documents
-/files/graph_rag_result.png
-/files/pipeline_result.png
+/data/documents/graph_rag_result.png
+/data/documents/pipeline_result.png
 
 # Unit test / coverage reports
 htmlcov/

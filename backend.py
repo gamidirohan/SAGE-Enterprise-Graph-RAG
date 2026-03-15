@@ -20,6 +20,7 @@ import shutil
 from pathlib import Path
 import logging
 import json
+import saia
 
 # Configure logging
 logging.basicConfig(
@@ -31,11 +32,14 @@ logger = logging.getLogger(__name__)
 # Download NLTK data
 nltk.download('punkt', quiet=True)
 
+ROOT_DIR = Path(__file__).resolve().parent
+
 # Load environment variables
-load_dotenv()
+load_dotenv(ROOT_DIR / ".env")
 NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USER = os.getenv("NEO4J_USERNAME")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+NEO4J_USER = os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_Password")
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Create FastAPI app
@@ -51,12 +55,18 @@ app.add_middleware(
 )
 
 # Create uploads directory if it doesn't exist
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR = ROOT_DIR / "data" / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Initialize Neo4j connection
 def get_neo4j_driver():
     return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+
+def get_neo4j_session(driver):
+    if NEO4J_DATABASE:
+        return driver.session(database=NEO4J_DATABASE)
+    return driver.session()
 
 # Initialize embedding model (cached)
 _embedding_model = None
@@ -133,7 +143,7 @@ def store_in_neo4j(data, document_text):
     )
 
     try:
-        with driver.session() as session:
+        with get_neo4j_session(driver) as session:
             # Create Document node
             document_summary = llm.invoke(f"Summarize this document, include the word json in the summary: {document_text}").content
             embedding = generate_embedding(document_summary[:5000])
@@ -189,7 +199,12 @@ def store_in_neo4j(data, document_text):
                     receiver_id=receiver,
                     doc_id=data["doc_id"]
                 )
-
+            # Trigger self-adjustment (SAIA) in background of successful ingestion
+            try:
+                import saia as _saia
+                _saia.trigger_saia(data["doc_id"], document_text)
+            except Exception as e:
+                logger.error(f"SAIA trigger error for {data['doc_id']}: {str(e)}")
             return True
     except Exception as e:
         logger.error(f"Error storing in Neo4j: {str(e)}")
@@ -207,7 +222,7 @@ def query_graph(user_input):
         query_embedding = np.array(query_embedding, dtype=np.float32)
 
         results = []
-        with driver.session() as session:
+        with get_neo4j_session(driver) as session:
             vector_query = """
                 MATCH (c:Chunk)-[:PART_OF]->(d:Document)
                 WHERE c.embedding IS NOT NULL
@@ -485,7 +500,7 @@ async def debug_graph():
     """
     driver = get_neo4j_driver()
     try:
-        with driver.session() as session:
+        with get_neo4j_session(driver) as session:
             node_counts = session.run("""
                 MATCH (n)
                 RETURN labels(n)[0] AS Label, count(*) AS Count

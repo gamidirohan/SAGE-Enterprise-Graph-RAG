@@ -1,0 +1,39 @@
+[project]
+name = "sage-enterprise-graph-rag"
+version = "0.1.0"
+description = "SAGE Enterprise Graph RAG backend, processing pipeline, and evaluation scripts."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "bert-score",
+    "fastapi",
+    "langchain",
+    "langchain-community",
+    "langchain-core",
+    "langchain-groq",
+    "langchain-neo4j",
+    "langchain-openai",
+    "matplotlib",
+    "neo4j",
+    "nltk",
+    "numpy",
+    "pandas",
+    "pydantic",
+    "pypdf2",
+    "pytest",
+    "python-dotenv",
+    "python-multipart",
+    "rouge",
+    "seaborn",
+    "sentence-transformers",
+    "streamlit",
+    "tqdm",
+    "uvicorn",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false
