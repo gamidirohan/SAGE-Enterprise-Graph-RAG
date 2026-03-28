@@ -1,26 +1,19 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, BackgroundTasks
+from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-import os
-import hashlib
 import numpy as np
 import re
-from neo4j import GraphDatabase
-from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
-from sentence_transformers import SentenceTransformer
-from PyPDF2 import PdfReader
-import nltk
-from nltk.tokenize import sent_tokenize, word_tokenize
 import shutil
-from pathlib import Path
 import logging
-import json
-import saia
+
+try:
+    import app.utils as utils
+except ImportError:
+    import utils
 
 # Configure logging
 logging.basicConfig(
@@ -29,18 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Download NLTK data
-nltk.download('punkt', quiet=True)
-
-ROOT_DIR = Path(__file__).resolve().parent
-
-# Load environment variables
-load_dotenv(ROOT_DIR / ".env")
-NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USER = os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_Password")
-NEO4J_DATABASE = os.getenv("NEO4J_DATABASE")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+NEO4J_DATABASE = utils.NEO4J_DATABASE
 
 # Create FastAPI app
 app = FastAPI(title="SAGE Enterprise Graph RAG API")
@@ -55,98 +37,24 @@ app.add_middleware(
 )
 
 # Create uploads directory if it doesn't exist
-UPLOAD_DIR = ROOT_DIR / "data" / "uploads"
+UPLOAD_DIR = utils.ROOT_DIR / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-# Initialize Neo4j connection
-def get_neo4j_driver():
-    return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-
-
-def get_neo4j_session(driver):
-    if NEO4J_DATABASE:
-        return driver.session(database=NEO4J_DATABASE)
-    return driver.session()
-
-# Initialize embedding model (cached)
-_embedding_model = None
-def get_embedding_model():
-    global _embedding_model
-    if _embedding_model is None:
-        _embedding_model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
-    return _embedding_model
-
-# Function to generate embeddings
-def generate_embedding(text):
-    model = get_embedding_model()
-    embedding = model.encode(text)
-    return embedding.tolist()
-
-# Function to extract text from PDF
-def extract_text_from_pdf(file_path):
-    with open(file_path, "rb") as f:
-        pdf_reader = PdfReader(f)
-        text = " ".join([page.extract_text() for page in pdf_reader.pages if page.extract_text()])
-    return text
-
-# Function to generate document ID
-def generate_doc_id(content: str) -> str:
-    """Generate a unique document ID based on the hashed content."""
-    return hashlib.sha256(content.encode()).hexdigest()
-
-# Function to chunk document
-def chunk_document(document_text, max_chunk_words=250, overlap_sentences=2):
-    """
-    Chunks a document into semantically meaningful units.
-
-    Args:
-        document_text (str): The document text.
-        max_chunk_words (int): Maximum number of words per chunk.
-        overlap_sentences (int): Number of sentences to overlap between chunks.
-
-    Returns:
-        list: A list of chunks.
-    """
-    paragraphs = document_text.split("\n\n")
-    chunks = []
-    previous_sentences = []
-
-    for paragraph in paragraphs:
-        sentences = sent_tokenize(paragraph)
-        current_chunk = []
-
-        for sentence in sentences:
-            current_chunk.append(sentence)
-
-            if len(word_tokenize(" ".join(current_chunk))) > max_chunk_words:
-                chunk_text = " ".join(previous_sentences + current_chunk[:-1])
-                chunks.append(chunk_text)
-
-                previous_sentences = current_chunk[-overlap_sentences:] if len(current_chunk) > overlap_sentences else current_chunk
-                current_chunk = current_chunk[-overlap_sentences:] if len(current_chunk) > overlap_sentences else []
-
-        if current_chunk:
-            chunk_text = " ".join(previous_sentences + current_chunk)
-            chunks.append(chunk_text)
-            previous_sentences = current_chunk[-overlap_sentences:] if len(current_chunk) > overlap_sentences else current_chunk
-
-    return chunks
 
 # Function to store document in Neo4j
 def store_in_neo4j(data, document_text):
-    driver = get_neo4j_driver()
+    driver = utils.create_neo4j_driver()
     llm = ChatGroq(
-        model_name="deepseek-r1-distill-llama-70b",
+        model_name=utils.GROQ_MODEL,
         temperature=0.0,
         model_kwargs={"response_format": {"type": "json_object"}},
-        groq_api_key=GROQ_API_KEY
+        groq_api_key=utils.GROQ_API_KEY
     )
 
     try:
-        with get_neo4j_session(driver) as session:
+        with utils.open_neo4j_session(driver, NEO4J_DATABASE) as session:
             # Create Document node
             document_summary = llm.invoke(f"Summarize this document, include the word json in the summary: {document_text}").content
-            embedding = generate_embedding(document_summary[:5000])
+            embedding = utils.generate_embedding(document_summary[:5000])
             session.run(
                 """
                 MERGE (d:Document {doc_id: $doc_id})
@@ -161,10 +69,10 @@ def store_in_neo4j(data, document_text):
             )
 
             # Chunk and create Chunk nodes
-            chunks = chunk_document(document_text)
+            chunks = utils.chunk_document(document_text, max_chunk_words=250, overlap_sentences=2)
             for i, chunk in enumerate(chunks):
                 chunk_summary = llm.invoke(f"Summarize this chunk, include the word json in the summary: {chunk}").content
-                chunk_embedding = generate_embedding(chunk_summary)
+                chunk_embedding = utils.generate_embedding(chunk_summary)
                 session.run(
                     """
                     MERGE (c:Chunk {chunk_id: $chunk_id})
@@ -200,12 +108,12 @@ def store_in_neo4j(data, document_text):
                     doc_id=data["doc_id"]
                 )
             # Trigger self-adjustment (SAIA) in background of successful ingestion
-            try:
-                import saia as _saia
-                _saia.trigger_saia(data["doc_id"], document_text)
-            except Exception as e:
-                logger.error(f"SAIA trigger error for {data['doc_id']}: {str(e)}")
-            return True
+            # try:
+            #     import under_development.saia as _saia
+            #     _saia.trigger_saia(data["doc_id"], document_text)
+            # except Exception as e:
+            #     logger.error(f"SAIA trigger error for {data['doc_id']}: {str(e)}")
+            # return True
     except Exception as e:
         logger.error(f"Error storing in Neo4j: {str(e)}")
         raise
@@ -216,13 +124,13 @@ def store_in_neo4j(data, document_text):
 def query_graph(user_input):
     driver = None
     try:
-        driver = get_neo4j_driver()
-        model = get_embedding_model()
+        driver = utils.create_neo4j_driver()
+        model = utils.get_cached_embedding_model()
         query_embedding = model.encode(user_input)
         query_embedding = np.array(query_embedding, dtype=np.float32)
 
         results = []
-        with get_neo4j_session(driver) as session:
+        with utils.open_neo4j_session(driver, NEO4J_DATABASE) as session:
             vector_query = """
                 MATCH (c:Chunk)-[:PART_OF]->(d:Document)
                 WHERE c.embedding IS NOT NULL
@@ -298,9 +206,9 @@ def generate_groq_response(query, documents):
 
         # Initialize LLM with slightly higher temperature for more conversational responses
         llm = ChatGroq(
-            model_name="deepseek-r1-distill-llama-70b",
+            model_name=utils.GROQ_MODEL,
             temperature=0.3,
-            groq_api_key=GROQ_API_KEY
+            groq_api_key=utils.GROQ_API_KEY
         )
 
         # Create chain
@@ -391,7 +299,7 @@ async def process_document(
 
         # Extract text from the document
         if file.filename.endswith('.pdf'):
-            document_text = extract_text_from_pdf(str(file_path))
+            document_text = utils.extract_text_from_pdf(str(file_path))
         elif file.filename.endswith('.txt'):
             with open(file_path, 'r', encoding='utf-8') as f:
                 document_text = f.read()
@@ -399,14 +307,14 @@ async def process_document(
             raise HTTPException(status_code=400, detail="Unsupported file format. Only PDF and TXT are supported.")
 
         # Generate document ID
-        doc_id = generate_doc_id(document_text)
+        doc_id = utils.generate_doc_id(document_text)
 
         # Initialize LLM for entity extraction
         llm = ChatGroq(
-            model_name="deepseek-r1-distill-llama-70b",
+            model_name=utils.GROQ_MODEL,
             temperature=0.0,
             model_kwargs={"response_format": {"type": "json_object"}},
-            groq_api_key=GROQ_API_KEY
+            groq_api_key=utils.GROQ_API_KEY
         )
 
         # Define entity extraction schema
@@ -498,9 +406,9 @@ async def debug_graph():
     """
     Analyze and return information about the graph structure.
     """
-    driver = get_neo4j_driver()
+    driver = utils.create_neo4j_driver()
     try:
-        with get_neo4j_session(driver) as session:
+        with utils.open_neo4j_session(driver, NEO4J_DATABASE) as session:
             node_counts = session.run("""
                 MATCH (n)
                 RETURN labels(n)[0] AS Label, count(*) AS Count

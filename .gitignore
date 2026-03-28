@@ -1,38 +1,54 @@
-# Environments
+# Environment and local secrets
 .env
-.env/
-myenv/
+.env.*
+.venv/
 venv/
 ENV/
-.venv/
+env/
+myenv/
 
-# Python cache files
+# Python bytecode and caches
 __pycache__/
 *.py[cod]
 *$py.class
-.pytest_cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.ipynb_checkpoints/
 
-# Uploaded files
-data/uploads/*
-!data/uploads/.gitkeep
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
 
-# Documents
-/data/documents/graph_rag_result.png
-/data/documents/pipeline_result.png
-
-# Unit test / coverage reports
+# Test, coverage, and reports
 htmlcov/
 .tox/
+.nox/
 .coverage
 .coverage.*
-.cache
+.cache/
 nosetests.xml
 coverage.xml
 *.cover
 .hypothesis/
 
-# IDE specific files
+# Uploaded files
+data/uploads/*
+!data/uploads/.gitkeep
+
+# Generated document images
+/data/documents/graph_rag_result.png
+/data/documents/pipeline_result.png
+
+# IDE and editor files
 .idea/
 .vscode/
 *.swp
 *.swo
+
+# OS-specific files
+.DS_Store
+Thumbs.db

@@ -5,7 +5,7 @@ from fastapi import BackgroundTasks, HTTPException
 import pytest
 from starlette.datastructures import UploadFile
 
-import backend
+from app import backend
 
 
 class _Ctx:
@@ -57,23 +57,23 @@ class _Model:
         return [0.1, 0.2]
 
 
-def test_get_neo4j_session_uses_database(monkeypatch):
+def test_open_neo4j_session_uses_database(monkeypatch):
     driver = _Driver()
     monkeypatch.setattr(backend, "NEO4J_DATABASE", "neo4j_db")
-    backend.get_neo4j_session(driver)
+    backend.utils.open_neo4j_session(driver, backend.NEO4J_DATABASE)
     assert driver.kwargs == {"database": "neo4j_db"}
 
 
-def test_get_neo4j_session_without_database(monkeypatch):
+def test_open_neo4j_session_without_database(monkeypatch):
     driver = _Driver()
     monkeypatch.setattr(backend, "NEO4J_DATABASE", None)
-    backend.get_neo4j_session(driver)
+    backend.utils.open_neo4j_session(driver, backend.NEO4J_DATABASE)
     assert driver.kwargs == {}
 
 
 def test_generate_doc_id_is_deterministic():
-    a = backend.generate_doc_id("sample")
-    b = backend.generate_doc_id("sample")
+    a = backend.utils.generate_doc_id("sample")
+    b = backend.utils.generate_doc_id("sample")
     assert a == b
     assert len(a) == 64
 
@@ -90,8 +90,8 @@ def test_query_graph_success(monkeypatch):
     ]
     session = _Session(rows=rows)
     driver = _Driver(session=session)
-    monkeypatch.setattr(backend, "get_neo4j_driver", lambda: driver)
-    monkeypatch.setattr(backend, "get_embedding_model", lambda: _Model())
+    monkeypatch.setattr(backend.utils, "create_neo4j_driver", lambda: driver)
+    monkeypatch.setattr(backend.utils, "get_cached_embedding_model", lambda: _Model())
 
     result = backend.query_graph("what is this?")
     assert len(result) == 1
@@ -102,8 +102,8 @@ def test_query_graph_success(monkeypatch):
 def test_query_graph_failure_returns_fallback(monkeypatch):
     session = _Session(should_fail=True)
     driver = _Driver(session=session)
-    monkeypatch.setattr(backend, "get_neo4j_driver", lambda: driver)
-    monkeypatch.setattr(backend, "get_embedding_model", lambda: _Model())
+    monkeypatch.setattr(backend.utils, "create_neo4j_driver", lambda: driver)
+    monkeypatch.setattr(backend.utils, "get_cached_embedding_model", lambda: _Model())
 
     result = backend.query_graph("what is this?")
     assert len(result) == 1

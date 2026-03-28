@@ -8,23 +8,19 @@ This script:
 4. Generates question-answer pairs for evaluation
 """
 
-import os
 import json
-import hashlib
 import logging
-import sys
-from typing import List, Dict, Any, Tuple
+import re
+from typing import List, Dict, Any
 from pathlib import Path
-from dotenv import load_dotenv
-from neo4j import GraphDatabase
-from sentence_transformers import SentenceTransformer
 from langchain_groq import ChatGroq
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
-import nltk
-from nltk.tokenize import sent_tokenize
 import time
 import random
+
+try:
+    import app.utils as utils
+except ImportError:
+    import utils
 
 # Configure logging
 logging.basicConfig(
@@ -33,74 +29,81 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Download NLTK data
-nltk.download('punkt', quiet=True)
+# Keep ingestion logs readable by suppressing verbose dependency HTTP/debug logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+logging.getLogger("neo4j.notifications").setLevel(logging.WARNING)
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.append(str(ROOT_DIR))
-
-# Load environment variables
-load_dotenv(ROOT_DIR / ".env")
-NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USER = os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_Password")
-NEO4J_DATABASE = os.getenv("NEO4J_DATABASE")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-DATA_DIR = ROOT_DIR / "data"
+DATA_DIR = utils.ROOT_DIR / "data"
 UPLOADS_DIR = DATA_DIR / "uploads"
 EVAL_DIR = DATA_DIR / "eval"
 DEFAULT_QA_OUTPUT = EVAL_DIR / "qa_pairs.json"
 
-# Initialize Neo4j connection
-def get_neo4j_driver():
-    return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+def summarize_text_fallback(text: str, max_len: int = 600) -> str:
+    """Create a lightweight summary when LLM is unavailable."""
+    clean = " ".join(text.split())
+    return clean[:max_len] if len(clean) > max_len else clean
 
 
-def get_session(driver):
-    if NEO4J_DATABASE:
-        return driver.session(database=NEO4J_DATABASE)
-    return driver.session()
+def summarize_with_optional_llm(llm, text: str) -> str:
+    """Use Groq summary when available; fallback to local summary on any error."""
+    if not llm:
+        return summarize_text_fallback(text)
+    try:
+        return llm.invoke(f"Summarize this content, include the word json in the summary: {text}").content
+    except Exception as exc:
+        logger.warning(f"Groq summary failed, using fallback summary: {exc}")
+        return summarize_text_fallback(text)
 
-# Initialize embedding model
-def get_embedding_model():
-    return SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
 
-# Function to generate embeddings
-def generate_embedding(text):
-    model = get_embedding_model()
-    embedding = model.encode(text)
-    return embedding.tolist()
+def extract_id_mappings(file_path: str) -> List[Dict[str, str]]:
+    """Extract employee ID to name/role mappings from a text file."""
+    mappings: List[Dict[str, str]] = []
+    pattern = re.compile(r"^(EMP\d+)\s*:\s*(.*?)\s*\((.*?)\)\s*$")
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.lower().startswith("ids"):
+                    continue
+                match = pattern.match(line)
+                if not match:
+                    continue
+                emp_id, name, role = match.groups()
+                mappings.append({"id": emp_id, "name": name, "role": role})
+    except Exception as exc:
+        logger.error(f"Error reading ID mappings from {file_path}: {exc}")
+        return []
+    return mappings
 
-# Function to generate document ID
-def generate_doc_id(content: str) -> str:
-    """Generate a unique document ID based on the hashed content."""
-    return hashlib.sha256(content.encode()).hexdigest()
 
-# Function to chunk document
-def chunk_document(text: str, max_chunk_size: int = 1000) -> List[str]:
-    """Split document into chunks of approximately max_chunk_size characters."""
-    sentences = sent_tokenize(text)
-    chunks = []
-    current_chunk = []
-    current_size = 0
+def upsert_id_mappings_to_neo4j(mappings: List[Dict[str, str]]) -> bool:
+    """Upsert employee metadata to Person nodes in Neo4j."""
+    if not mappings:
+        return False
 
-    for sentence in sentences:
-        sentence_size = len(sentence)
-        if current_size + sentence_size <= max_chunk_size:
-            current_chunk.append(sentence)
-            current_size += sentence_size
-        else:
-            if current_chunk:
-                chunks.append(" ".join(current_chunk))
-            current_chunk = [sentence]
-            current_size = sentence_size
-
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
-
-    return chunks
+    driver = utils.create_neo4j_driver()
+    try:
+        with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
+            for row in mappings:
+                session.run(
+                    """
+                    MERGE (p:Person {id: $id})
+                    SET p.name = $name,
+                        p.role = $role
+                    """,
+                    id=row["id"],
+                    name=row["name"],
+                    role=row["role"],
+                )
+        return True
+    except Exception as exc:
+        logger.error(f"Error upserting ID mappings to Neo4j: {exc}")
+        return False
+    finally:
+        driver.close()
 
 # Function to extract structured data from a message file
 def extract_message_data(file_path: str) -> Dict[str, Any]:
@@ -109,48 +112,69 @@ def extract_message_data(file_path: str) -> Dict[str, Any]:
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
 
-        # Extract sender, receiver, and message
+        # Support both legacy message files and documents_ui mail-style files.
         lines = content.strip().split('\n')
 
-        # Parse the message format
+        # Parse fields from either format.
         sender_id = None
-        receiver_id = None
+        receiver_ids: List[str] = []
+        subject = None
         message_text = None
         sent_time = None
 
-        for line in lines:
-            if line.startswith('Sender ID:'):
-                sender_id = line.replace('Sender ID:', '').strip()
-            elif line.startswith('Receiver ID:'):
-                receiver_id = line.replace('Receiver ID:', '').strip()
-            elif line.startswith('Message:'):
-                message_text = line.replace('Message:', '').strip()
-                # If message continues on multiple lines
-                message_index = lines.index(line)
-                if message_index < len(lines) - 1:
-                    next_line_index = message_index + 1
-                    while next_line_index < len(lines) and not lines[next_line_index].startswith('Sent Time:'):
-                        message_text += '\n' + lines[next_line_index]
-                        next_line_index += 1
-            elif line.startswith('Sent Time:'):
-                sent_time = line.replace('Sent Time:', '').strip()
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith('Sender ID:'):
+                sender_id = stripped.replace('Sender ID:', '').strip()
+            elif stripped.startswith('Sender:'):
+                sender_id = stripped.replace('Sender:', '').strip()
+            elif stripped.startswith('Receiver ID:'):
+                receiver_ids = [stripped.replace('Receiver ID:', '').strip()]
+            elif stripped.startswith('Receiver:'):
+                receivers_raw = stripped.replace('Receiver:', '').strip()
+                receiver_ids = [r.strip() for r in receivers_raw.split(',') if r.strip()]
+            elif stripped.startswith('Subject:'):
+                subject = stripped.replace('Subject:', '').strip()
+            elif stripped.startswith('Message:'):
+                message_text = stripped.replace('Message:', '').strip()
+                next_line_index = idx + 1
+                while next_line_index < len(lines) and not lines[next_line_index].startswith('Sent Time:'):
+                    message_text += '\n' + lines[next_line_index]
+                    next_line_index += 1
+            elif stripped.startswith('Sent Time:'):
+                sent_time = stripped.replace('Sent Time:', '').strip()
+
+        # For mail-style docs, treat body after Subject as message content.
+        if not message_text and subject:
+            subject_index = None
+            for idx, line in enumerate(lines):
+                if line.strip().startswith('Subject:'):
+                    subject_index = idx
+                    break
+
+            if subject_index is not None:
+                body_lines = lines[subject_index + 1:]
+                while body_lines and not body_lines[0].strip():
+                    body_lines.pop(0)
+                message_text = '\n'.join(body_lines).strip()
 
         # Validate required fields
-        if not sender_id or not receiver_id or not message_text:
+        if not sender_id or not receiver_ids or not message_text:
             logger.error(f"Missing required fields in {file_path}")
             return None
 
         # Generate document ID
-        doc_id = generate_doc_id(content)
+        doc_id = utils.generate_doc_id(content)
 
-        # Create a subject from the first few words of the message
-        words = message_text.split()
-        subject = ' '.join(words[:min(5, len(words))]) + '...'
+        # Create a fallback subject from the first few words if subject is missing.
+        if not subject:
+            words = message_text.split()
+            subject = ' '.join(words[:min(5, len(words))]) + '...'
 
         return {
             "doc_id": doc_id,
             "sender": sender_id,
-            "receivers": [receiver_id],  # Single receiver per message
+            "receivers": receiver_ids,
             "subject": subject,
             "content": message_text,
             "sent_time": sent_time
@@ -162,32 +186,29 @@ def extract_message_data(file_path: str) -> Dict[str, Any]:
 # Function to store document in Neo4j
 def store_in_neo4j(data: Dict[str, Any]) -> bool:
     """Store document and its chunks in Neo4j."""
-    driver = get_neo4j_driver()
-    llm = ChatGroq(
-        model_name="deepseek-r1-distill-llama-70b",
-        temperature=0.0,
-        model_kwargs={"response_format": {"type": "json_object"}},
-        groq_api_key=GROQ_API_KEY
-    )
+    driver = utils.create_neo4j_driver()
+    llm = None
+    if utils.GROQ_API_KEY:
+        try:
+            llm = ChatGroq(
+                model_name=utils.GROQ_MODEL,
+                temperature=0.0,
+                model_kwargs={"response_format": {"type": "json_object"}},
+                groq_api_key=utils.GROQ_API_KEY
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to initialize Groq client, using fallback summaries: {exc}")
+            llm = None
+    else:
+        logger.warning("GROQ_API_KEY not found. Falling back to local summaries for ingestion.")
 
     try:
-        with get_session(driver) as session:
-            # First, check if document already exists
-            result = session.run(
-                """
-                MATCH (d:Document {doc_id: $doc_id})
-                RETURN d
-                """,
-                doc_id=data["doc_id"]
-            ).single()
-
-            if result:
-                logger.info(f"Document {data['doc_id']} already exists in the database.")
-                return True
+        with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
+            # Always upsert document/chunks/relationships to repair partial ingestions.
 
             # Create Document node
-            document_summary = llm.invoke(f"Summarize this document, include the word json in the summary: {data['content']}").content
-            embedding = generate_embedding(document_summary[:5000])
+            document_summary = summarize_with_optional_llm(llm, data["content"])
+            embedding = utils.generate_embedding(document_summary[:5000])
             session.run(
                 """
                 MERGE (d:Document {doc_id: $doc_id})
@@ -202,10 +223,10 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
             )
 
             # Chunk and create Chunk nodes
-            chunks = chunk_document(data["content"])
+            chunks = utils.chunk_document(data["content"], max_chunk_words=250, overlap_sentences=2)
             for i, chunk in enumerate(chunks):
-                chunk_summary = llm.invoke(f"Summarize this chunk, include the word json in the summary: {chunk}").content
-                chunk_embedding = generate_embedding(chunk_summary)
+                chunk_summary = summarize_with_optional_llm(llm, chunk)
+                chunk_embedding = utils.generate_embedding(chunk_summary)
                 session.run(
                     """
                     MERGE (c:Chunk {chunk_id: $chunk_id})
@@ -244,11 +265,11 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
 
             logger.info(f"Successfully stored document {data['doc_id']} in Neo4j.")
             # Trigger SAIA to adjust existing knowledge given this new document
-            try:
-                import saia as _saia
-                _saia.trigger_saia(data["doc_id"], data["content"])
-            except Exception as e:
-                logger.error(f"SAIA trigger error for {data['doc_id']}: {str(e)}")
+            # try:
+            #     import under_development.saia as _saia
+            #     _saia.trigger_saia(data["doc_id"], data["content"])
+            # except Exception as e:
+            #     logger.error(f"SAIA trigger error for {data['doc_id']}: {str(e)}")
             return True
     except Exception as e:
         logger.error(f"Error storing document in Neo4j: {str(e)}")
@@ -282,6 +303,15 @@ def process_message_files(directory: str) -> List[Dict[str, Any]]:
         for file_path in batch:
             logger.info(f"Processing file: {file_path}")
 
+            file_name = Path(file_path).name.lower()
+            if "id mapping" in file_name:
+                mappings = extract_id_mappings(file_path)
+                if mappings and upsert_id_mappings_to_neo4j(mappings):
+                    logger.info(f"Successfully ingested {len(mappings)} ID mappings from {file_path}")
+                else:
+                    logger.error(f"Failed to ingest ID mappings from {file_path}")
+                continue
+
             # Extract data from file
             data = extract_message_data(file_path)
             if data:
@@ -300,17 +330,17 @@ def process_message_files(directory: str) -> List[Dict[str, Any]]:
 # Function to generate question-answer pairs
 def generate_qa_pairs(num_pairs: int = 30) -> List[Dict[str, str]]:
     """Generate question-answer pairs based on the data in Neo4j."""
-    driver = get_neo4j_driver()
+    driver = utils.create_neo4j_driver()
     llm = ChatGroq(
-        model_name="deepseek-r1-distill-llama-70b",
+        model_name=utils.GROQ_MODEL,
         temperature=0.7,  # Higher temperature for more diverse questions
-        groq_api_key=GROQ_API_KEY
+        groq_api_key=utils.GROQ_API_KEY
     )
 
     qa_pairs = []
 
     try:
-        with get_session(driver) as session:
+        with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
             # Get all documents
             documents = session.run(
                 """
@@ -379,7 +409,7 @@ def generate_qa_pairs(num_pairs: int = 30) -> List[Dict[str, str]]:
                             question = question[1:-1]
 
                         # Query the graph to get the answer
-                        model = get_embedding_model()
+                        model = utils.get_cached_embedding_model()
                         query_embedding = model.encode(question)
 
                         vector_results = session.run(
@@ -451,7 +481,7 @@ def save_qa_pairs(qa_pairs: List[Dict[str, str]], output_file: str = str(DEFAULT
     try:
         output_path = Path(output_file)
         if not output_path.is_absolute():
-            output_path = ROOT_DIR / output_path
+            output_path = utils.ROOT_DIR / output_path
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(qa_pairs, f, indent=2)

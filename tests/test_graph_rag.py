@@ -50,13 +50,13 @@ def _build_fake_streamlit():
 def _import_graph_rag(monkeypatch):
     fake_streamlit = _build_fake_streamlit()
     monkeypatch.setitem(sys.modules, "streamlit", fake_streamlit)
-    if "graph_rag" in sys.modules:
-        del sys.modules["graph_rag"]
-    module = importlib.import_module("graph_rag")
+    if "app.graph_rag" in sys.modules:
+        del sys.modules["app.graph_rag"]
+    module = importlib.import_module("app.graph_rag")
     return module, fake_streamlit
 
 
-def test_get_neo4j_session_uses_database(monkeypatch):
+def test_open_neo4j_session_uses_database(monkeypatch):
     module, _st = _import_graph_rag(monkeypatch)
 
     class Driver:
@@ -69,7 +69,7 @@ def test_get_neo4j_session_uses_database(monkeypatch):
 
     driver = Driver()
     monkeypatch.setattr(module, "NEO4J_DATABASE", "neo_db")
-    module.get_neo4j_session(driver)
+    module.utils.open_neo4j_session(driver, module.NEO4J_DATABASE)
     assert driver.kwargs == {"database": "neo_db"}
 
 

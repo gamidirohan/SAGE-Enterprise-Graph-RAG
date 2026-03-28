@@ -19,7 +19,7 @@ dependencies = [
     "numpy",
     "pandas",
     "pydantic",
-    "pypdf2",
+    "pypdf",
     "pytest",
     "python-dotenv",
     "python-multipart",

@@ -1,39 +1,15 @@
 import streamlit as st
-import os
-from neo4j import GraphDatabase
-from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
 import numpy as np
 import re
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from pathlib import Path
+try:
+    import app.utils as utils
+except ImportError:
+    import utils
 
-ROOT_DIR = Path(__file__).resolve().parent
-
-# Load environment variables
-load_dotenv(ROOT_DIR / ".env")
-NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USER = os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_Password")
-NEO4J_DATABASE = os.getenv("NEO4J_DATABASE")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-# Initialize Neo4j connection
-def get_neo4j_driver():
-    return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-
-
-def get_neo4j_session(driver):
-    if NEO4J_DATABASE:
-        return driver.session(database=NEO4J_DATABASE)
-    return driver.session()
-
-# Initialize embedding model
-@st.cache_resource
-def get_embedding_model():
-    return SentenceTransformer('all-mpnet-base-v2')
+NEO4J_DATABASE = utils.NEO4J_DATABASE
 
 # Streamlit UI
 st.set_page_config(page_title="SAGE: Graph-Based Chat", layout="wide")
@@ -71,9 +47,9 @@ with chat_history_box.container():
 # Debug Graph Structure section
 if st.checkbox("Debug Graph Structure"):
     with st.spinner("Analyzing graph structure..."):
-        driver = get_neo4j_driver()
+        driver = utils.create_neo4j_driver()
         try:
-            with get_neo4j_session(driver) as session:
+            with utils.open_neo4j_session(driver, NEO4J_DATABASE) as session:
                 node_counts = session.run("""
                     MATCH (n) 
                     RETURN labels(n)[0] AS Label, count(*) AS Count
@@ -88,7 +64,7 @@ if st.checkbox("Debug Graph Structure"):
 
                 sample_docs = session.run("""
                     MATCH (d:Document)
-                    RETURN d.doc_id AS DocID, d.title AS Title, d.doc_type AS Type
+                    RETURN d.doc_id AS DocID, d.subject AS Subject, d.sender AS Sender
                     LIMIT 5
                 """).data()
 
@@ -100,10 +76,11 @@ if st.checkbox("Debug Graph Structure"):
                 """).data()
 
                 entity_doc_connections = session.run("""
-                    MATCH (e:Entity)
-                    RETURN e.name AS Entity, 
-                        e.type AS Type,
-                        COUNT { (e)--() } AS ConnectionCount
+                    MATCH (p:Person)
+                    RETURN p.id AS Person,
+                        p.name AS Name,
+                        p.role AS Role,
+                        COUNT { (p)--() } AS ConnectionCount
                     ORDER BY ConnectionCount DESC
                     LIMIT 10
                 """).data()
@@ -128,7 +105,7 @@ if st.checkbox("Debug Graph Structure"):
                 else:
                     st.success("No isolated nodes found - good connectivity!")
 
-            st.subheader("Top Connected Entities")
+            st.subheader("Top Connected People")
             st.table(entity_doc_connections)
 
         except Exception as e:
@@ -138,13 +115,13 @@ if st.checkbox("Debug Graph Structure"):
 
 # Function to query Neo4j for related data (No LLM)
 def query_graph(user_input):
-    driver = get_neo4j_driver()
-    model = get_embedding_model()
+    driver = utils.create_neo4j_driver()
+    model = utils.get_cached_embedding_model()
     query_embedding = model.encode(user_input)
     query_embedding = np.array(query_embedding, dtype=np.float32)
 
     results = []
-    with get_neo4j_session(driver) as session:
+    with utils.open_neo4j_session(driver, NEO4J_DATABASE) as session:
         try:
             vector_query = """
                 MATCH (c:Chunk)-[:PART_OF]->(d:Document)
@@ -175,11 +152,18 @@ def query_graph(user_input):
 def generate_groq_response(query, documents):
     if not documents:
         return "No relevant information found."
-    context = "\n\n".join([item.split('Chunk Summary: ')[1].split(', Document: ')[0] for item in documents]) #Extracts the chunk summary.
+    context_parts = []
+    for item in documents:
+        try:
+            context_parts.append(item.split("Chunk Summary: ")[1].split(", Document: ")[0])
+        except Exception:
+            context_parts.append(str(item))
+    context = "\n\n".join(context_parts)
+
     prompt_template = ChatPromptTemplate.from_template(
         "Answer the following question based on the provided context:\n\nQuestion: {query}\n\nContext:\n{context}\n\nAnswer:"
     )
-    llm = ChatGroq(model_name="deepseek-r1-distill-llama-70b", temperature=0.0, groq_api_key=GROQ_API_KEY)
+    llm = ChatGroq(model_name=utils.GROQ_MODEL, temperature=0.0, groq_api_key=utils.GROQ_API_KEY)
     chain = prompt_template | llm | StrOutputParser()
 
     try:
