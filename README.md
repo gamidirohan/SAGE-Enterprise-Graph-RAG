@@ -47,14 +47,7 @@ GROQ_API_KEY=...
 ```
 
 Important note:
-- Some modules load `.env` from repo root, while others currently read from `app/.env`.
-- For compatibility right now, keep `.env` at repo root and also copy it to `app/.env`.
-
-PowerShell:
-
-```powershell
-Copy-Item .env app/.env -Force
-```
+- App modules load `.env` from the repo root.
 
 ## Running Interfaces
 

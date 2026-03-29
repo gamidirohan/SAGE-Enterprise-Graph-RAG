@@ -18,6 +18,7 @@ Usage:
 import os
 import json
 import argparse
+import random
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -162,6 +163,137 @@ try:
         logger.info(f"Loaded {len(DEFAULT_TEST_QUERIES)} test queries from {QA_PAIRS_FILE}")
 except Exception as e:
     logger.warning(f"Could not load QA pairs from {QA_PAIRS_FILE}: {str(e)}")
+
+
+def generate_qa_pairs(num_pairs: int = 30) -> List[Dict[str, str]]:
+    """Generate question-answer pairs from the graph for evaluation."""
+    try:
+        from app import message_processor
+    except ImportError:
+        import message_processor
+
+    driver = message_processor.get_neo4j_driver()
+    llm = ChatGroq(
+        model_name="deepseek-r1-distill-llama-70b",
+        temperature=0.7,
+        groq_api_key=GROQ_API_KEY,
+    )
+
+    qa_pairs = []
+
+    try:
+        with message_processor.get_session(driver) as session:
+            documents = session.run(
+                """
+                MATCH (d:Document)
+                RETURN d.doc_id AS doc_id, d.subject AS subject, d.content AS content, d.summary AS summary
+                """
+            ).data()
+
+            if not documents:
+                logger.error("No documents found in the database.")
+                return []
+
+            people = session.run(
+                """
+                MATCH (p:Person)
+                RETURN p.id AS id
+                """
+            ).data()
+            person_ids = [p["id"] for p in people]
+
+            question_types = [
+                "Generate a specific question about the content of this document: {summary}",
+                "Generate a question about what {person} is working on or responsible for. Person ID: {person}",
+                "Generate a question about the relationship between {person1} and {person2}",
+                "Generate a question about Project Phoenix based on this document: {summary}",
+                "Generate a question about timelines, deadlines, or schedules mentioned in this document: {summary}",
+            ]
+
+            pairs_per_type = num_pairs // len(question_types) + 1
+            model = SentenceTransformer(f"sentence-transformers/all-mpnet-base-v2")
+
+            for question_type in question_types:
+                for _ in range(pairs_per_type):
+                    if len(qa_pairs) >= num_pairs:
+                        break
+
+                    try:
+                        if "{person}" in question_type:
+                            if not person_ids:
+                                continue
+                            prompt = question_type.format(person=random.choice(person_ids))
+                        elif "{person1}" in question_type and "{person2}" in question_type:
+                            if len(person_ids) < 2:
+                                continue
+                            person1, person2 = random.sample(person_ids, 2)
+                            prompt = question_type.format(person1=person1, person2=person2)
+                        else:
+                            document = random.choice(documents)
+                            prompt = question_type.format(summary=document["summary"])
+
+                        question = llm.invoke(prompt).content.strip().strip('"')
+                        query_embedding = model.encode(question)
+                        vector_results = session.run(
+                            """
+                            MATCH (c:Chunk)-[:PART_OF]->(d:Document)
+                            WHERE c.embedding IS NOT NULL
+                            WITH c, d, c.embedding AS chunk_embedding, $query_embedding AS query_embedding
+                            WITH c, d, gds.similarity.cosine(chunk_embedding, query_embedding) AS similarity
+                            ORDER BY similarity DESC
+                            LIMIT 3
+                            RETURN c.summary AS chunk_summary, d.subject AS subject, similarity
+                            """,
+                            query_embedding=query_embedding.tolist(),
+                        ).data()
+
+                        if not vector_results:
+                            continue
+
+                        context = "\n\n".join([f"{r['chunk_summary']} (From: {r['subject']})" for r in vector_results])
+                        answer_prompt = f"""
+                        Answer the following question based on the provided context:
+
+                        Question: {question}
+
+                        Context:
+                        {context}
+
+                        If the context doesn't contain enough information to answer the question fully,
+                        say so and provide what information you can based on the context.
+
+                        Answer:
+                        """
+                        answer = llm.invoke(answer_prompt).content.strip()
+                        qa_pairs.append({"question": question, "answer": answer, "context": context})
+                        logger.info(f"Generated QA pair: {question}")
+                        time.sleep(1)
+                    except Exception as exc:
+                        logger.error(f"Error generating QA pair: {exc}")
+                        continue
+
+            return qa_pairs[:num_pairs]
+    except Exception as exc:
+        logger.error(f"Error generating QA pairs: {exc}")
+        return []
+    finally:
+        driver.close()
+
+
+def save_qa_pairs(qa_pairs: List[Dict[str, str]], output_file: str = str(QA_PAIRS_FILE)):
+    """Save generated QA pairs to JSON."""
+    try:
+        output_path = Path(output_file)
+        if not output_path.is_absolute():
+            output_path = ROOT_DIR / output_path
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(qa_pairs, f, indent=2)
+        logger.info(f"Successfully saved {len(qa_pairs)} QA pairs to {output_path}")
+        return True
+    except Exception as exc:
+        logger.error(f"Error saving QA pairs to {output_file}: {exc}")
+        return False
 
 class RAGSystem:
     """Base class for RAG systems"""
@@ -1256,7 +1388,7 @@ def main():
     if args.generate_qa:
         logger.info("Generating question-answer pairs...")
         try:
-            from message_processor import generate_qa_pairs, save_qa_pairs
+            from scripts.performance_comparison import generate_qa_pairs, save_qa_pairs
             qa_pairs = generate_qa_pairs(num_pairs=30)
             save_qa_pairs(qa_pairs, str(QA_PAIRS_FILE))
             logger.info(f"Generated {len(qa_pairs)} question-answer pairs.")

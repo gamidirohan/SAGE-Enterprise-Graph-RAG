@@ -59,15 +59,13 @@ class _Model:
 
 def test_open_neo4j_session_uses_database(monkeypatch):
     driver = _Driver()
-    monkeypatch.setattr(backend, "NEO4J_DATABASE", "neo4j_db")
-    backend.utils.open_neo4j_session(driver, backend.NEO4J_DATABASE)
+    backend.utils.open_neo4j_session(driver, "neo4j_db")
     assert driver.kwargs == {"database": "neo4j_db"}
 
 
 def test_open_neo4j_session_without_database(monkeypatch):
     driver = _Driver()
-    monkeypatch.setattr(backend, "NEO4J_DATABASE", None)
-    backend.utils.open_neo4j_session(driver, backend.NEO4J_DATABASE)
+    backend.utils.open_neo4j_session(driver, None)
     assert driver.kwargs == {}
 
 
@@ -125,14 +123,9 @@ def test_generate_groq_response_parses_thinking(monkeypatch):
         def invoke(self, _payload):
             return "<think>step 1</think>Final answer"
 
-    class FakePrompt:
-        @staticmethod
-        def from_template(_template):
-            return FakeChain()
-
-    monkeypatch.setattr(backend, "ChatPromptTemplate", FakePrompt)
-    monkeypatch.setattr(backend, "ChatGroq", lambda **_kwargs: object())
-    monkeypatch.setattr(backend, "StrOutputParser", lambda: object())
+    monkeypatch.setattr(backend.services, "CHAT_PROMPT", FakeChain())
+    monkeypatch.setattr(backend.services, "_create_groq_client", lambda **_kwargs: object())
+    monkeypatch.setattr(backend.services, "StrOutputParser", lambda: object())
 
     result = backend.generate_groq_response("q", ["Chunk Summary: ctx, Document: d"])
     assert result["answer"] == "Final answer"
@@ -157,4 +150,4 @@ def test_process_document_unsupported_extension_raises_http_exception():
     file = UploadFile(filename="bad.docx", file=io.BytesIO(b"hello"))
     with pytest.raises(HTTPException) as exc:
         asyncio.run(backend.process_document(BackgroundTasks(), file))
-    assert exc.value.status_code == 500
+    assert exc.value.status_code == 400

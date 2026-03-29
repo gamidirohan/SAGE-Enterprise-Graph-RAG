@@ -68,8 +68,7 @@ def test_open_neo4j_session_uses_database(monkeypatch):
             return object()
 
     driver = Driver()
-    monkeypatch.setattr(module, "NEO4J_DATABASE", "neo_db")
-    module.utils.open_neo4j_session(driver, module.NEO4J_DATABASE)
+    module.utils.open_neo4j_session(driver, "neo_db")
     assert driver.kwargs == {"database": "neo_db"}
 
 
@@ -81,22 +80,7 @@ def test_generate_groq_response_with_no_documents(monkeypatch):
 
 def test_generate_groq_response_success(monkeypatch):
     module, _st = _import_graph_rag(monkeypatch)
-
-    class FakeChain:
-        def __or__(self, _other):
-            return self
-
-        def invoke(self, _payload):
-            return "final"
-
-    class FakePrompt:
-        @staticmethod
-        def from_template(_template):
-            return FakeChain()
-
-    monkeypatch.setattr(module, "ChatPromptTemplate", FakePrompt)
-    monkeypatch.setattr(module, "ChatGroq", lambda **_kwargs: object())
-    monkeypatch.setattr(module, "StrOutputParser", lambda: object())
+    monkeypatch.setattr(module.services, "generate_streamlit_response", lambda _q, _d: "final")
 
     result = module.generate_groq_response("q", ["Chunk Summary: ctx, Document: d"])
     assert result == "final"

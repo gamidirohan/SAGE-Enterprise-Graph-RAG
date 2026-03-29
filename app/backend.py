@@ -1,28 +1,28 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
-import numpy as np
-import re
-from langchain_groq import ChatGroq
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
-import shutil
+"""FastAPI backend for the SAGE app.
+
+This file exposes the HTTP API for chat, document ingestion, graph debugging,
+and health checks while delegating shared business logic to app services.
+"""
+
 import logging
+import shutil
+from typing import Any, Dict, List, Optional
+
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 try:
+    import app.services as services
     import app.utils as utils
+    from app.message_processor import store_in_neo4j
 except ImportError:
+    import services
     import utils
+    from message_processor import store_in_neo4j
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+
 logger = logging.getLogger(__name__)
-
-NEO4J_DATABASE = utils.NEO4J_DATABASE
 
 # Create FastAPI app
 app = FastAPI(title="SAGE Enterprise Graph RAG API")
@@ -40,211 +40,17 @@ app.add_middleware(
 UPLOAD_DIR = utils.ROOT_DIR / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# Function to store document in Neo4j
-def store_in_neo4j(data, document_text):
-    driver = utils.create_neo4j_driver()
-    llm = ChatGroq(
-        model_name=utils.GROQ_MODEL,
-        temperature=0.0,
-        model_kwargs={"response_format": {"type": "json_object"}},
-        groq_api_key=utils.GROQ_API_KEY
-    )
-
-    try:
-        with utils.open_neo4j_session(driver, NEO4J_DATABASE) as session:
-            # Create Document node
-            document_summary = llm.invoke(f"Summarize this document, include the word json in the summary: {document_text}").content
-            embedding = utils.generate_embedding(document_summary[:5000])
-            session.run(
-                """
-                MERGE (d:Document {doc_id: $doc_id})
-                SET d.sender = $sender, d.subject = $subject, d.content = $content, d.embedding = $embedding, d.summary = $summary
-                """,
-                doc_id=data["doc_id"],
-                sender=data["sender"],
-                subject=data["subject"],
-                content=data["content"],
-                embedding=embedding,
-                summary=document_summary
-            )
-
-            # Chunk and create Chunk nodes
-            chunks = utils.chunk_document(document_text, max_chunk_words=250, overlap_sentences=2)
-            for i, chunk in enumerate(chunks):
-                chunk_summary = llm.invoke(f"Summarize this chunk, include the word json in the summary: {chunk}").content
-                chunk_embedding = utils.generate_embedding(chunk_summary)
-                session.run(
-                    """
-                    MERGE (c:Chunk {chunk_id: $chunk_id})
-                    SET c.content = $content, c.embedding = $embedding, c.summary = $summary
-                    MERGE (d:Document {doc_id: $doc_id})
-                    MERGE (c)-[:PART_OF]->(d)
-                    """,
-                    chunk_id=f"{data['doc_id']}-chunk-{i}",
-                    content=chunk,
-                    embedding=chunk_embedding,
-                    summary=chunk_summary,
-                    doc_id=data["doc_id"]
-                )
-
-            # Create Sender and Receiver nodes and relationships
-            session.run(
-                """
-                MERGE (s:Person {id: $sender_id})
-                MERGE (d:Document {doc_id: $doc_id})
-                MERGE (s)-[:SENT]->(d)
-                """,
-                sender_id=data["sender"],
-                doc_id=data["doc_id"]
-            )
-            for receiver in data["receivers"]:
-                session.run(
-                    """
-                    MERGE (r:Person {id: $receiver_id})
-                    MERGE (d:Document {doc_id: $doc_id})
-                    MERGE (d)-[:RECEIVED_BY]->(r)
-                    """,
-                    receiver_id=receiver,
-                    doc_id=data["doc_id"]
-                )
-            # Trigger self-adjustment (SAIA) in background of successful ingestion
-            # try:
-            #     import under_development.saia as _saia
-            #     _saia.trigger_saia(data["doc_id"], document_text)
-            # except Exception as e:
-            #     logger.error(f"SAIA trigger error for {data['doc_id']}: {str(e)}")
-            # return True
-    except Exception as e:
-        logger.error(f"Error storing in Neo4j: {str(e)}")
-        raise
-    finally:
-        driver.close()
-
-# Function to query Neo4j for related data
-def query_graph(user_input):
-    driver = None
-    try:
-        driver = utils.create_neo4j_driver()
-        model = utils.get_cached_embedding_model()
-        query_embedding = model.encode(user_input)
-        query_embedding = np.array(query_embedding, dtype=np.float32)
-
-        results = []
-        with utils.open_neo4j_session(driver, NEO4J_DATABASE) as session:
-            vector_query = """
-                MATCH (c:Chunk)-[:PART_OF]->(d:Document)
-                WHERE c.embedding IS NOT NULL
-                WITH c, d, c.embedding AS chunk_embedding, $query_embedding AS query_embedding
-                WITH c, d, gds.similarity.cosine(chunk_embedding, query_embedding) AS similarity
-                ORDER BY similarity DESC
-                LIMIT 3
-                MATCH (c)-[r]-(n)
-                RETURN c.summary AS chunk_summary, d, similarity, type(r) as relationship, n
-            """
-            vector_results = session.run(vector_query, query_embedding=query_embedding.tolist()).data()
-
-            if vector_results:
-                results = [
-                    f"Chunk Summary: {item.get('chunk_summary', 'No summary')}, Document: {item.get('d', {})}, Similarity: {item.get('similarity', 0)}, Relationship: {item.get('relationship', 'unknown')}, Related Node: {item.get('n', {})}"
-                    for item in vector_results
-                ]
-            else:
-                results = ["I don't seem to have any relevant information about that in my knowledge base. Let me know if you'd like to ask about something else!"]
-
-        return results
-    except Exception as e:
-        logger.error(f"Vector search failed: {str(e)}")
-        # Return a message about the error instead of raising
-        return [f"I encountered a technical issue while searching for information. I'd be happy to try again if you rephrase your question!"]
-    finally:
-        if driver:
-            driver.close()
-
-# Function to generate response using Groq
-def generate_groq_response(query, documents):
-    if not documents:
-        return {
-            "answer": "I've searched through my knowledge base, but I don't have any specific information about that topic yet. Would you like to ask about something else or perhaps upload a document with this information?",
-            "thinking": []
-        }
-
-    try:
-        # Extract context from documents
-        context_parts = []
-        for item in documents:
-            try:
-                # Try to extract the chunk summary
-                chunk_summary = item.split('Chunk Summary: ')[1].split(', Document: ')[0]
-                context_parts.append(chunk_summary)
-            except (IndexError, AttributeError):
-                # If extraction fails, use the whole item
-                context_parts.append(str(item))
-
-        context = "\n\n".join(context_parts)
-
-        # Create prompt template with SAGE personality
-        prompt_template = ChatPromptTemplate.from_template(
-            """
-            You are SAGE, an intelligent and friendly AI assistant specialized in retrieving and explaining information from documents.
-            Your tone is helpful, conversational, and slightly enthusiastic. You refer to yourself as "I" and address the user directly.
-
-            When answering questions:
-            - Be concise but thorough
-            - Use a friendly, conversational tone
-            - If you're not sure about something, be honest about it
-            - Occasionally use phrases like "I found" or "According to the documents" to emphasize your retrieval capabilities
-            - Format your responses in a readable way with paragraphs and bullet points when appropriate
-
-            Here is the user's question: {query}
-
-            Here is the relevant context from the documents(Keep in mind you get limited context and that's what you should work with):
-            {context}
-
-            Respond to the user's question in a helpful, conversational way based on the context provided:
-            """
-        )
-
-        # Initialize LLM with slightly higher temperature for more conversational responses
-        llm = ChatGroq(
-            model_name=utils.GROQ_MODEL,
-            temperature=0.3,
-            groq_api_key=utils.GROQ_API_KEY
-        )
-
-        # Create chain
-        chain = prompt_template | llm | StrOutputParser()
-
-        # Invoke chain
-        response = chain.invoke({"query": query, "context": context})
-
-        # Process <think> tags
-        think_parts = re.findall(r"<think>(.*?)</think>", response, re.DOTALL)
-        answer = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
-
-        # Ensure answer is not empty
-        if not answer or answer.isspace():
-            answer = "I'm sorry, but I couldn't find a specific answer to your question in the documents I have access to. Could you try rephrasing your question or asking about something else? I'm here to help!"
-
-        return {
-            "answer": answer,
-            "thinking": think_parts if think_parts else []
-        }
-    except Exception as e:
-        logger.error(f"Groq API error: {str(e)}")
-        # Return a graceful error message instead of raising an exception
-        return {
-            "answer": f"I'm sorry, but I seem to be having a bit of trouble processing your question right now. Could we try again in a moment? If the issue persists, you might want to try rephrasing your question. I'm eager to help once we get past this hiccup!",
-            "thinking": [f"Error: {str(e)}"]
-        }
+query_graph = services.query_graph
+generate_groq_response = services.generate_groq_response
 
 # Pydantic models for request/response validation
 class ChatRequest(BaseModel):
     message: str
-    history: Optional[List[Dict[str, str]]] = []
+    history: Optional[List[Dict[str, str]]] = Field(default_factory=list)
 
 class ChatResponse(BaseModel):
     answer: str
-    thinking: List[str] = []
+    thinking: List[str] = Field(default_factory=list)
 
 class DocumentProcessResponse(BaseModel):
     doc_id: str
@@ -308,82 +114,10 @@ async def process_document(
 
         # Generate document ID
         doc_id = utils.generate_doc_id(document_text)
-
-        # Initialize LLM for entity extraction
-        llm = ChatGroq(
-            model_name=utils.GROQ_MODEL,
-            temperature=0.0,
-            model_kwargs={"response_format": {"type": "json_object"}},
-            groq_api_key=utils.GROQ_API_KEY
-        )
-
-        # Define entity extraction schema
-        schema = {
-            "type": "object",
-            "properties": {
-                "doc_id": {"type": "string"},
-                "sender": {"type": "string"},
-                "receivers": {"type": "array", "items": {"type": "string"}},
-                "subject": {"type": "string"},
-                "content": {"type": "string"}
-            },
-            "required": ["doc_id", "sender", "receivers", "subject", "content"]
-        }
-
-        # JSON Output Parser
-        parser = JsonOutputParser(pydantic_object=schema)
-
-        # Define LLM Prompt
-        prompt = ChatPromptTemplate.from_template(
-            """
-            You are an advanced document intelligence system. Extract Sender, Receivers, Subject and content from the following document.
-
-            **Instructions:**
-            1. Extract the Sender ID.
-            2. Extract the Receiver IDs as an array.
-            3. Extract the Subject.
-            4. Extract the main Content.
-
-            **Output Format:**
-            Provide the structured data in JSON format following this schema:
-            ```json
-            {{
-                "doc_id": "<hashed_document_id>",
-                "sender": "<sender_id>",
-                "receivers": ["<receiver_id1>", "<receiver_id2>", ...],
-                "subject": "<subject>",
-                "content": "<content>"
-            }}
-            ```
-
-            **Input Document:**
-            ```
-            {input}
-            ```
-
-            Remember to output ONLY valid JSON that follows the schema exactly.
-            """
-        )
-
-        # Create processing pipeline
-        chain = prompt | llm | parser
-
-        # Extract structured entities & relationships
-        structured_data = chain.invoke({"input": document_text})
-        structured_data["doc_id"] = doc_id  # Ensure we use our generated doc_id
-
-        # Ensure all required fields have valid values
-        if "sender" not in structured_data or structured_data["sender"] is None:
-            structured_data["sender"] = "Unknown"
-        if "receivers" not in structured_data or structured_data["receivers"] is None:
-            structured_data["receivers"] = []
-        if "subject" not in structured_data or structured_data["subject"] is None:
-            structured_data["subject"] = "No Subject"
-        if "content" not in structured_data or structured_data["content"] is None:
-            structured_data["content"] = document_text
+        structured_data = services.extract_structured_data(document_text, doc_id)
 
         # Store in Neo4j (run in background to avoid blocking)
-        background_tasks.add_task(store_in_neo4j, structured_data, document_text)
+        background_tasks.add_task(store_in_neo4j, structured_data)
 
         return {
             "doc_id": doc_id,
@@ -394,6 +128,8 @@ async def process_document(
             "message": "Document processing started. Data will be stored in the graph database."
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error processing document: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing document: {str(e)}")
@@ -408,7 +144,7 @@ async def debug_graph():
     """
     driver = utils.create_neo4j_driver()
     try:
-        with utils.open_neo4j_session(driver, NEO4J_DATABASE) as session:
+        with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
             node_counts = session.run("""
                 MATCH (n)
                 RETURN labels(n)[0] AS Label, count(*) AS Count
@@ -465,4 +201,4 @@ async def health_check():
 # Run the application with uvicorn
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("backend:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app.backend:app", host="0.0.0.0", port=8000, reload=True)

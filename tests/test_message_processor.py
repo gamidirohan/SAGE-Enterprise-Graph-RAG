@@ -1,7 +1,6 @@
-import json
 from pathlib import Path
 
-import scripts.message_processor as message_processor
+from app import message_processor
 
 
 def test_extract_message_data_parses_multiline_message(tmp_path):
@@ -50,18 +49,6 @@ def test_process_message_files_processes_txt_files_only(monkeypatch, tmp_path):
     assert len(result) == 2
 
 
-def test_save_qa_pairs_writes_output(monkeypatch, tmp_path):
-    monkeypatch.setattr(message_processor, "ROOT_DIR", tmp_path)
-    qa_pairs = [{"question": "q1", "answer": "a1"}]
-
-    ok = message_processor.save_qa_pairs(qa_pairs, "out/qa.json")
-    output_file = tmp_path / "out" / "qa.json"
-
-    assert ok is True
-    assert output_file.exists()
-    assert json.loads(output_file.read_text(encoding="utf-8")) == qa_pairs
-
-
 def test_get_session_uses_database(monkeypatch):
     class Driver:
         def __init__(self):
@@ -95,7 +82,7 @@ def test_store_in_neo4j_returns_false_on_session_error(monkeypatch):
     driver = Driver()
     monkeypatch.setattr(message_processor, "get_neo4j_driver", lambda: driver)
     monkeypatch.setattr(message_processor, "get_session", lambda _d: FailingCtx())
-    monkeypatch.setattr(message_processor, "ChatGroq", lambda **_kwargs: object())
+    monkeypatch.setattr(message_processor.utils, "GROQ_API_KEY", None)
 
     ok = message_processor.store_in_neo4j(
         {"doc_id": "d1", "sender": "EMP001", "receivers": ["EMP002"], "subject": "s", "content": "c"}
