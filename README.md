@@ -31,6 +31,13 @@ This project uses `uv` and a local `.venv`.
 
 ```bash
 uv venv .venv
+
+# Windows activate .venv
+.venv/Scripts/activate
+
+# Linux/Mac activate .venv
+source .venv/bin/activate
+
 uv sync
 ```
 
