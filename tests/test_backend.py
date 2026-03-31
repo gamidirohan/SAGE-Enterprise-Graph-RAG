@@ -133,12 +133,24 @@ def test_generate_groq_response_parses_thinking(monkeypatch):
 
 
 def test_chat_endpoint_uses_query_and_generator(monkeypatch):
-    monkeypatch.setattr(backend, "query_graph", lambda _m: ["ctx"])
-    monkeypatch.setattr(backend, "generate_groq_response", lambda _q, _d: {"answer": "ok", "thinking": []})
+    monkeypatch.setattr(
+        backend,
+        "query_graph_with_trace",
+        lambda _m, user_id=None: {
+            "documents": ["ctx"],
+            "trace": {"query_type": "general_search", "user_scoped": bool(user_id), "evidence": []},
+        },
+    )
+    monkeypatch.setattr(
+        backend,
+        "generate_groq_response",
+        lambda _q, _d, user_id=None: {"answer": "ok", "thinking": [], "trace": {"user_scoped": bool(user_id)}},
+    )
 
     request = backend.ChatRequest(message="hi", history=[])
     result = asyncio.run(backend.chat_endpoint(request))
     assert result["answer"] == "ok"
+    assert result["trace"]["query_type"] == "general_search"
 
 
 def test_health_check_endpoint():
@@ -146,8 +158,81 @@ def test_health_check_endpoint():
     assert result == {"status": "ok"}
 
 
+def test_sync_user_endpoint(monkeypatch):
+    monkeypatch.setattr(backend, "upsert_user_in_neo4j", lambda _req: True)
+    request = backend.UserSyncRequest(id="u1", name="Test User", email="u@example.com", team=[])
+    result = asyncio.run(backend.sync_user_endpoint(request))
+    assert result["success"] is True
+    assert result["user_id"] == "u1"
+
+
+def test_sync_messages_endpoint(monkeypatch):
+    monkeypatch.setattr(backend, "store_chat_message_in_neo4j", lambda _item: True)
+    request = backend.ChatMessageSyncRequest(
+        messages=[
+            backend.ChatMessageSyncItem(
+                id="m1",
+                senderId="u1",
+                receiverId="u2",
+                content="hello",
+                timestamp="2026-03-29T00:00:00Z",
+            )
+        ]
+    )
+    result = asyncio.run(backend.sync_messages_endpoint(request))
+    assert result["success"] is True
+    assert result["ingested"] == 1
+    assert result["failed"] == 0
+
+
 def test_process_document_unsupported_extension_raises_http_exception():
     file = UploadFile(filename="bad.docx", file=io.BytesIO(b"hello"))
     with pytest.raises(HTTPException) as exc:
         asyncio.run(backend.process_document(BackgroundTasks(), file))
     assert exc.value.status_code == 400
+
+
+def test_process_document_returns_success_after_storage(monkeypatch):
+    file = UploadFile(filename="notes.txt", file=io.BytesIO(b"meeting notes"))
+    monkeypatch.setattr(backend.utils, "generate_doc_id", lambda _text: "doc-123")
+    monkeypatch.setattr(
+        backend.services,
+        "extract_structured_data",
+        lambda _text, doc_id: {
+            "doc_id": doc_id,
+            "sender": "u1",
+            "receivers": ["u2"],
+            "subject": "Meeting Notes",
+            "content": "meeting notes",
+        },
+    )
+    monkeypatch.setattr(backend, "store_in_neo4j", lambda _data: True)
+
+    result = asyncio.run(backend.process_document(BackgroundTasks(), file))
+
+    assert result["success"] is True
+    assert result["doc_id"] == "doc-123"
+    assert result["message"] == "Document processed and stored in the graph database."
+
+
+def test_process_document_raises_if_storage_fails(monkeypatch):
+    file = UploadFile(filename="notes.txt", file=io.BytesIO(b"meeting notes"))
+    monkeypatch.setattr(backend.utils, "generate_doc_id", lambda _text: "doc-123")
+    monkeypatch.setattr(
+        backend.services,
+        "extract_structured_data",
+        lambda _text, doc_id: {
+            "doc_id": doc_id,
+            "sender": "u1",
+            "receivers": ["u2"],
+            "subject": "Meeting Notes",
+            "content": "meeting notes",
+        },
+    )
+    monkeypatch.setattr(backend, "store_in_neo4j", lambda _data: False)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(backend.process_document(BackgroundTasks(), file))
+
+    assert exc.value.status_code == 500
+    assert exc.value.detail == "Failed to store document in the graph database."

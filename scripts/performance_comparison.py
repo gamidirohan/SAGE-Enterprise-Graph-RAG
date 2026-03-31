@@ -165,14 +165,19 @@ except Exception as e:
     logger.warning(f"Could not load QA pairs from {QA_PAIRS_FILE}: {str(e)}")
 
 
+def get_neo4j_driver():
+    return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+
+def get_session(driver):
+    if NEO4J_DATABASE:
+        return driver.session(database=NEO4J_DATABASE)
+    return driver.session()
+
+
 def generate_qa_pairs(num_pairs: int = 30) -> List[Dict[str, str]]:
     """Generate question-answer pairs from the graph for evaluation."""
-    try:
-        from app import message_processor
-    except ImportError:
-        import message_processor
-
-    driver = message_processor.get_neo4j_driver()
+    driver = get_neo4j_driver()
     llm = ChatGroq(
         model_name="deepseek-r1-distill-llama-70b",
         temperature=0.7,
@@ -182,7 +187,7 @@ def generate_qa_pairs(num_pairs: int = 30) -> List[Dict[str, str]]:
     qa_pairs = []
 
     try:
-        with message_processor.get_session(driver) as session:
+        with get_session(driver) as session:
             documents = session.run(
                 """
                 MATCH (d:Document)
@@ -1376,13 +1381,10 @@ def main():
 
     # Process messages if requested
     if args.process_messages:
-        logger.info("Processing messages from data/uploads...")
-        try:
-            from message_processor import process_message_files
-            processed_data = process_message_files(str(UPLOADS_DIR))
-            logger.info(f"Processed {len(processed_data)} message files.")
-        except Exception as e:
-            logger.error(f"Error processing messages: {str(e)}")
+        logger.warning(
+            "The legacy message_processor workflow was removed. "
+            "Use `uv run streamlit run app/pipeline.py` and the Messages tab for ingestion."
+        )
 
     # Generate QA pairs if requested
     if args.generate_qa:

@@ -7,13 +7,13 @@ pushd "%ROOT_DIR%"
 REM Activate virtual environment
 call .venv\Scripts\activate
 
-REM Process messages and generate QA pairs
-echo Step 1: Processing messages from data/uploads folder...
-python scripts\message_processor.py --directory data\uploads --num-pairs 10 --output data\eval\qa_pairs_quick.json
+REM Generate QA pairs from existing graph data
+echo Step 1: Generating QA pairs from graph data...
+python scripts\performance_comparison.py --generate-qa
 
 REM Run the performance comparison with a single model
 echo Step 2: Running quick performance comparison...
-python scripts\performance_comparison.py --queries data\eval\qa_pairs_quick.json --output results\quick_comparison_results.json --llm-models "llama3-8b-8192" --embedding-models "all-mpnet-base-v2"
+python scripts\performance_comparison.py --queries data\eval\qa_pairs.json --output results\quick_comparison_results.json --llm-models "llama3-8b-8192" --embedding-models "all-mpnet-base-v2"
 
 REM Generate report
 echo Step 3: Generating report...

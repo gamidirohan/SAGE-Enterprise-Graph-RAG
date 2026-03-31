@@ -61,18 +61,12 @@ Important note:
 ### 1) Streamlit Chat Interface (verified)
 
 ```bash
-uv run streamlit run app/graph_rag.py
+uv run streamlit run app/pipeline.py
 ```
 
 Default URL: `http://localhost:8501`
 
-### 2) Streamlit Document Processor
-
-```bash
-uv run streamlit run app/pipeline.py
-```
-
-### 3) FastAPI Backend
+### 2) FastAPI Backend
 
 ```bash
 uv run python app/backend.py
@@ -92,40 +86,9 @@ Useful endpoints:
 - Uploaded files are stored in `data/uploads/`.
 - Evaluation inputs live under `data/eval/`.
 
-## Important Message Processor Commands
+## Single Streamlit App
 
-These are the main flag-based commands used for ingestion and evaluation workflows.
-
-### From repo root (recommended)
-
-```bash
-# Ingest documents/messages only (no QA generation)
-uv run python app/message_processor.py --directory data/documents_ui --skip-qa
-
-# Ingest uploaded message files only (no QA generation)
-uv run python app/message_processor.py --directory data/uploads --skip-qa
-
-# Generate QA pairs only (skip ingestion)
-uv run python app/message_processor.py --skip-processing --num-pairs 30 --output data/eval/qa_pairs.json
-
-# Full run: ingest + generate QA pairs
-uv run python app/message_processor.py --directory data/documents_ui --num-pairs 30 --output data/eval/qa_pairs.json
-```
-
-### From inside `app/` folder
-
-```bash
-# Equivalent to the root command above when current directory is app/
-uv run python message_processor.py --directory ../data/documents_ui --skip-qa
-```
-
-### Useful flags
-
-- `--directory <path>`: input folder of `.txt` files to process.
-- `--skip-qa`: ingest data only, no QA generation.
-- `--skip-processing`: generate QA only from existing graph data.
-- `--num-pairs <n>`: number of QA pairs to generate.
-- `--output <path>`: output JSON path for generated QA pairs.
+`app/pipeline.py` now contains the Streamlit chat, document processing, and message-ingestion flows in one place.
 
 ## Scripts
 

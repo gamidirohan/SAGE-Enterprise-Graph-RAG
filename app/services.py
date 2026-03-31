@@ -1,12 +1,12 @@
-"""Shared application services for SAGE.
+"""Business logic and LLM services for SAGE.
 
-This file centralizes reusable document-extraction, graph-retrieval, and LLM
-response logic so the Streamlit and FastAPI entrypoints stay smaller and cleaner.
+Use this file for prompt templates, document extraction, graph retrieval,
+chat response generation, and other domain-level application behavior.
 """
 
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
@@ -29,8 +29,22 @@ GRAPH_VECTOR_QUERY = """
     ORDER BY similarity DESC
     LIMIT 3
     MATCH (c)-[r]-(n)
-    RETURN c.summary AS chunk_summary, d, similarity, type(r) as relationship, n
+    RETURN c.chunk_id AS chunk_id, c.summary AS chunk_summary, d, similarity, type(r) as relationship, n
 """
+
+PERSON_GRAPH_VECTOR_QUERY = """
+    MATCH (p:Person {id: $user_id})
+    MATCH (p)-[:SENT|RECEIVED_BY]-(d:Document)<-[:PART_OF]-(c:Chunk)
+    WHERE c.embedding IS NOT NULL
+    WITH c, d, c.embedding AS chunk_embedding, $query_embedding AS query_embedding
+    WITH c, d, gds.similarity.cosine(chunk_embedding, query_embedding) AS similarity
+    ORDER BY similarity DESC
+    LIMIT 3
+    MATCH (c)-[r]-(n)
+    RETURN c.chunk_id AS chunk_id, c.summary AS chunk_summary, d, similarity, type(r) as relationship, n
+"""
+
+FIRST_PERSON_PATTERN = re.compile(r"\b(i|me|my|mine|myself)\b", re.IGNORECASE)
 
 DOCUMENT_EXTRACTION_SCHEMA = {
     "type": "object",
@@ -55,13 +69,13 @@ DOCUMENT_EXTRACTION_PROMPT = ChatPromptTemplate.from_template(
     4. Extract the main Content.
 
     Output format (JSON only):
-    {
+    {{
         "doc_id": "<hashed_document_id>",
         "sender": "<sender_id>",
         "receivers": ["<receiver_id1>", "<receiver_id2>"],
         "subject": "<subject>",
         "content": "<content>"
-    }
+    }}
 
     Input document:
     {input}
@@ -79,8 +93,14 @@ CHAT_PROMPT = ChatPromptTemplate.from_template(
     - If you're not sure about something, be honest about it
     - Occasionally use phrases like "I found" or "According to the documents" to emphasize your retrieval capabilities
     - Format your responses in a readable way with paragraphs and bullet points when appropriate
+    - If the context includes names, dates, document IDs, or senders, mention them explicitly
+    - Do not replace a known person with vague phrases like "someone" or "a person"
+    - If the evidence is weak or incomplete, say that clearly instead of overstating confidence
 
     Here is the user's question: {query}
+
+    Identity context:
+    {user_context}
 
     Here is the relevant context from the documents (keep in mind you get limited context and that's what you should work with):
     {context}
@@ -111,6 +131,87 @@ def _extract_context_parts(documents: List[str]) -> List[str]:
     return context_parts
 
 
+def _contains_first_person(text: str) -> bool:
+    return bool(FIRST_PERSON_PATTERN.search(text))
+
+
+def _classify_query(text: str) -> str:
+    lowered = text.lower()
+    if _contains_first_person(text):
+        return "personal_context"
+    if any(token in lowered for token in ("weekend", "today", "tomorrow", "schedule", "meeting", "plan")):
+        return "schedule_or_timeline"
+    if any(token in lowered for token in ("why", "reason", "cause", "delayed")):
+        return "explanation"
+    if any(token in lowered for token in ("who", "whose", "person", "people")):
+        return "person_lookup"
+    return "general_search"
+
+
+def _serialize_neo4j_entity(value: Any) -> Dict[str, Any]:
+    if value is None:
+        return {}
+
+    serialized: Dict[str, Any]
+    if isinstance(value, dict):
+        serialized = dict(value)
+    elif hasattr(value, "items"):
+        serialized = dict(value.items())
+    else:
+        try:
+            serialized = dict(value)
+        except Exception:
+            serialized = {"value": str(value)}
+
+    labels = list(getattr(value, "labels", []))
+    if labels:
+        serialized["_labels"] = labels
+
+    element_id = getattr(value, "element_id", None)
+    if element_id:
+        serialized["_element_id"] = element_id
+
+    return serialized
+
+
+def _get_primary_label(entity: Dict[str, Any]) -> str:
+    labels = entity.get("_labels") or []
+    if labels:
+        return str(labels[0])
+    return "Node"
+
+
+def _get_display_name(entity: Dict[str, Any]) -> str:
+    for key in ("name", "id", "doc_id", "title", "subject", "value"):
+        value = entity.get(key)
+        if value:
+            return str(value)
+    return _get_primary_label(entity)
+
+
+def _build_path_summary(user_scoped: bool, related_label: Optional[str]) -> Dict[str, Any]:
+    nodes = ["Person", "Document", "Chunk"] if user_scoped else ["Document", "Chunk"]
+    if related_label:
+        nodes.append(related_label)
+    return {
+        "nodes": nodes,
+        "path": " -> ".join(nodes),
+        "hop_count": max(len(nodes) - 1, 0),
+    }
+
+
+def _merge_ranked_results(primary: List[Dict[str, Any]], secondary: List[Dict[str, Any]], limit: int = 5) -> List[Dict[str, Any]]:
+    by_chunk: Dict[str, Dict[str, Any]] = {}
+    for row in primary + secondary:
+        chunk_id = str(row.get("chunk_id", ""))
+        existing = by_chunk.get(chunk_id)
+        if existing is None or row.get("similarity", 0) > existing.get("similarity", 0):
+            by_chunk[chunk_id] = row
+    merged = list(by_chunk.values())
+    merged.sort(key=lambda item: item.get("similarity", 0), reverse=True)
+    return merged[:limit]
+
+
 def extract_structured_data(document_text: str, doc_id: str) -> Dict[str, Any]:
     if not utils.GROQ_API_KEY:
         return {
@@ -134,43 +235,131 @@ def extract_structured_data(document_text: str, doc_id: str) -> Dict[str, Any]:
     return structured_data
 
 
-def query_graph(user_input: str) -> List[str]:
+def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Dict[str, Any]:
     driver = None
+    personalized_lookup = bool(user_id and _contains_first_person(user_input))
+    query_type = _classify_query(user_input)
+
     try:
         driver = utils.create_neo4j_driver()
         model = utils.get_cached_embedding_model()
-        query_embedding = np.array(model.encode(user_input), dtype=np.float32)
+        query_text = user_input if not personalized_lookup else f"{user_input}\nAuthenticated user id: {user_id}"
+        query_embedding = np.array(model.encode(query_text), dtype=np.float32)
 
         with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
-            vector_results = session.run(
+            global_results = session.run(
                 GRAPH_VECTOR_QUERY,
                 query_embedding=query_embedding.tolist(),
             ).data()
+            person_results: List[Dict[str, Any]] = []
+            if personalized_lookup:
+                person_results = session.run(
+                    PERSON_GRAPH_VECTOR_QUERY,
+                    user_id=user_id,
+                    query_embedding=query_embedding.tolist(),
+                ).data()
 
-        if not vector_results:
-            return [
+        vector_results = _merge_ranked_results(person_results, global_results, limit=5)
+        evidence: List[Dict[str, Any]] = []
+        documents: List[str] = []
+        matched_entities: List[str] = []
+
+        for item in vector_results:
+            document = _serialize_neo4j_entity(item.get("d"))
+            related_node = _serialize_neo4j_entity(item.get("n"))
+            related_label = _get_primary_label(related_node) if related_node else None
+            related_name = _get_display_name(related_node) if related_node else None
+            path_summary = _build_path_summary(personalized_lookup, related_label)
+
+            sender = document.get("sender")
+            subject = document.get("subject")
+            doc_id = document.get("doc_id")
+            similarity = round(float(item.get("similarity", 0) or 0), 4)
+            relationship = item.get("relationship") or "RELATED_TO"
+
+            for candidate in (sender, subject, related_name):
+                if candidate and candidate not in matched_entities:
+                    matched_entities.append(str(candidate))
+
+            evidence_item = {
+                "chunk_id": item.get("chunk_id"),
+                "chunk_summary": item.get("chunk_summary", "No summary"),
+                "similarity": similarity,
+                "relationship": relationship,
+                "retrieval_path": path_summary["path"],
+                "hop_count": path_summary["hop_count"],
+                "document": {
+                    "doc_id": doc_id,
+                    "subject": subject,
+                    "sender": sender,
+                    "timestamp": document.get("timestamp"),
+                    "source": document.get("source"),
+                },
+                "related_node": {
+                    "label": related_label,
+                    "display_name": related_name,
+                    "id": related_node.get("id"),
+                } if related_node else {},
+            }
+            evidence.append(evidence_item)
+
+            documents.append(
+                "Chunk Summary: "
+                f"{evidence_item['chunk_summary']}, "
+                f"Document ID: {doc_id or 'unknown'}, "
+                f"Subject: {subject or 'No Subject'}, "
+                f"Sender: {sender or 'Unknown'}, "
+                f"Similarity: {similarity}, "
+                f"Relationship: {relationship}, "
+                f"Related Node: {related_name or 'Unknown'}"
+            )
+
+        if not documents:
+            documents = [
                 "I don't seem to have any relevant information about that in my knowledge base. Let me know if you'd like to ask about something else!"
             ]
 
-        return [
-            f"Chunk Summary: {item.get('chunk_summary', 'No summary')}, "
-            f"Document: {item.get('d', {})}, "
-            f"Similarity: {item.get('similarity', 0)}, "
-            f"Relationship: {item.get('relationship', 'unknown')}, "
-            f"Related Node: {item.get('n', {})}"
-            for item in vector_results
-        ]
+        trace = {
+            "query": user_input,
+            "query_type": query_type,
+            "user_scoped": personalized_lookup,
+            "user_id": user_id,
+            "matched_entities": matched_entities,
+            "result_count": len(evidence),
+            "max_hop_count": max((item["hop_count"] for item in evidence), default=0),
+            "retrieval_path": evidence[0]["retrieval_path"] if evidence else _build_path_summary(personalized_lookup, None)["path"],
+            "evidence": evidence,
+        }
+        return {"documents": documents, "trace": trace}
     except Exception as exc:
         logger.error(f"Vector search failed: {exc}")
-        return [
-            "I encountered a technical issue while searching for information. I'd be happy to try again if you rephrase your question!"
-        ]
+        return {
+            "documents": [
+                "I encountered a technical issue while searching for information. I'd be happy to try again if you rephrase your question!"
+            ],
+            "trace": {
+                "query": user_input,
+                "query_type": "error",
+                "user_scoped": personalized_lookup,
+                "user_id": user_id,
+                "matched_entities": [],
+                "result_count": 0,
+                "max_hop_count": 0,
+                "retrieval_path": _build_path_summary(personalized_lookup, None)["path"],
+                "evidence": [],
+                "error": str(exc),
+            },
+        }
     finally:
         if driver:
             driver.close()
 
 
-def generate_groq_response(query: str, documents: List[str]) -> Dict[str, List[str] | str]:
+def query_graph(user_input: str, user_id: Optional[str] = None) -> List[str]:
+    return query_graph_with_trace(user_input, user_id=user_id)["documents"]
+
+
+def generate_groq_response(query: str, documents: List[str], user_id: Optional[str] = None) -> Dict[str, List[str] | str]:
     if not documents:
         return {
             "answer": "I've searched through my knowledge base, but I don't have any specific information about that topic yet. Would you like to ask about something else or perhaps upload a document with this information?",
@@ -179,9 +368,14 @@ def generate_groq_response(query: str, documents: List[str]) -> Dict[str, List[s
 
     try:
         context = "\n\n".join(_extract_context_parts(documents))
+        user_context = "No authenticated user context was provided."
+        if user_id:
+            user_context = f"Authenticated user id: {user_id}."
+            if _contains_first_person(query):
+                user_context += " Treat first-person references (I/me/my) as this user unless the query says otherwise."
         llm = _create_groq_client(temperature=0.3)
         chain = CHAT_PROMPT | llm | StrOutputParser()
-        response = chain.invoke({"query": query, "context": context})
+        response = chain.invoke({"query": query, "context": context, "user_context": user_context})
 
         think_parts = re.findall(r"<think>(.*?)</think>", response, re.DOTALL)
         answer = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
@@ -204,3 +398,91 @@ def generate_streamlit_response(query: str, documents: List[str]) -> str:
     if not documents:
         return "No relevant information found."
     return generate_groq_response(query, documents)["answer"]
+
+
+def _summarize_text_fallback(text: str, max_len: int = 600) -> str:
+    clean = " ".join(text.split())
+    return clean[:max_len] if len(clean) > max_len else clean
+
+
+def _summarize_with_optional_llm(llm, text: str) -> str:
+    if not llm:
+        return _summarize_text_fallback(text)
+    try:
+        return llm.invoke(f"Summarize this content, include the word json in the summary: {text}").content
+    except Exception as exc:
+        logger.warning(f"Groq summary failed, using fallback summary: {exc}")
+        return _summarize_text_fallback(text)
+
+
+def store_in_neo4j(data: Dict[str, Any]) -> bool:
+    driver = utils.create_neo4j_driver()
+    llm = None
+    if utils.GROQ_API_KEY:
+        try:
+            llm = _create_groq_client(temperature=0.0, require_json=True)
+        except Exception as exc:
+            logger.warning(f"Failed to initialize Groq client, using fallback summaries: {exc}")
+    else:
+        logger.warning("GROQ_API_KEY not found. Falling back to local summaries for ingestion.")
+
+    try:
+        with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
+            document_summary = _summarize_with_optional_llm(llm, data["content"])
+            embedding = utils.generate_embedding(document_summary[:5000])
+            session.run(
+                """
+                MERGE (d:Document {doc_id: $doc_id})
+                SET d.sender = $sender, d.subject = $subject, d.content = $content, d.embedding = $embedding, d.summary = $summary
+                """,
+                doc_id=data["doc_id"],
+                sender=data["sender"],
+                subject=data["subject"],
+                content=data["content"],
+                embedding=embedding,
+                summary=document_summary,
+            )
+
+            chunks = utils.chunk_document(data["content"], max_chunk_words=250, overlap_sentences=2)
+            for i, chunk in enumerate(chunks):
+                chunk_summary = _summarize_with_optional_llm(llm, chunk)
+                chunk_embedding = utils.generate_embedding(chunk_summary)
+                session.run(
+                    """
+                    MERGE (c:Chunk {chunk_id: $chunk_id})
+                    SET c.content = $content, c.embedding = $embedding, c.summary = $summary
+                    MERGE (d:Document {doc_id: $doc_id})
+                    MERGE (c)-[:PART_OF]->(d)
+                    """,
+                    chunk_id=f"{data['doc_id']}-chunk-{i}",
+                    content=chunk,
+                    embedding=chunk_embedding,
+                    summary=chunk_summary,
+                    doc_id=data["doc_id"],
+                )
+
+            session.run(
+                """
+                MERGE (s:Person {id: $sender_id})
+                MERGE (d:Document {doc_id: $doc_id})
+                MERGE (s)-[:SENT]->(d)
+                """,
+                sender_id=data["sender"],
+                doc_id=data["doc_id"],
+            )
+            for receiver in data["receivers"]:
+                session.run(
+                    """
+                    MERGE (r:Person {id: $receiver_id})
+                    MERGE (d:Document {doc_id: $doc_id})
+                    MERGE (d)-[:RECEIVED_BY]->(r)
+                    """,
+                    receiver_id=receiver,
+                    doc_id=data["doc_id"],
+                )
+        return True
+    except Exception as exc:
+        logger.error(f"Error storing document in Neo4j: {exc}")
+        return False
+    finally:
+        driver.close()

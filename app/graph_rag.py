@@ -4,9 +4,14 @@ This file renders the interactive graph-aware chat UI and connects user input
 to the shared retrieval and response-generation services.
 """
 
+from pathlib import Path
+import sys
 import re
 
 import streamlit as st
+
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
     import app.services as services

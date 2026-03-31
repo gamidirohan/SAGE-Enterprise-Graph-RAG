@@ -10,9 +10,9 @@ call .venv\Scripts\activate
 REM Create results directory if it doesn't exist
 if not exist results mkdir results
 
-REM Process messages and generate QA pairs
-echo Step 1: Processing messages from data/uploads folder...
-python scripts\message_processor.py --directory data\uploads --num-pairs 30 --output data\eval\qa_pairs.json
+REM Generate QA pairs from existing graph data
+echo Step 1: Generating QA pairs from graph data...
+python scripts\performance_comparison.py --generate-qa
 
 REM Run the performance comparison with a subset of models
 echo Step 2: Running initial performance comparison with a subset of models...

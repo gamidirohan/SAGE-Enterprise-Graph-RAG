@@ -1,7 +1,7 @@
-"""Shared utility helpers and configuration for SAGE.
+"""Infrastructure and low-level helpers for SAGE.
 
-This file loads environment settings, creates Neo4j/model helpers, and provides
-common text-processing functions used throughout the app package.
+Use this file for environment loading, Neo4j connection setup, embedding model
+access, document chunking, and other reusable building blocks.
 """
 
 import hashlib
