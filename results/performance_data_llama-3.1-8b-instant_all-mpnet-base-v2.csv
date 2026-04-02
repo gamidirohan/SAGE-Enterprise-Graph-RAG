@@ -1,0 +1,11 @@
+Query,SAGE Score,Traditional Score,SAGE Latency,Traditional Latency,Similarity F1
+What are the main responsibilities of Alice Johnson?,7,8.0,4.38178563117981,0.6390178203582764,0.4583333291167535
+Summarize the key points from the latest meeting notes,8,2.0,1.542309045791626,3.422386407852173,0.3461538412721894
+What projects is Bob Smith working on?,9,6.0,4.988767147064209,1.5358390808105469,0.4077669854614008
+What are the deadlines for the current sprint?,9,7.0,2.9192771911621094,0.7639515399932861,0.25396825069286977
+Who is responsible for the data analysis task?,8,8.5,3.161099433898926,1.4251530170440674,0.33802816529954377
+What is the relationship between Carol Williams and David Lee?,6,8.0,1.7101178169250488,0.64300537109375,0.44705881854671287
+What are the key findings from the latest data analysis?,9,7.0,4.77901554107666,0.79994797706604,0.4646464596714621
+When is the next team meeting scheduled?,9,8.0,3.2377820014953613,0.7375993728637695,0.4848484810238752
+What are the main challenges mentioned in the project documentation?,8,6.0,1.6054835319519043,8.802384853363037,0.40251571829437127
+How does the team handle task assignments?,8,9.0,7.295982599258423,15.188921451568604,0.3240223413875972

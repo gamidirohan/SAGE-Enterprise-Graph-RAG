@@ -1,5 +1,6 @@
 import asyncio
 import io
+import zipfile
 
 from fastapi import BackgroundTasks, HTTPException
 import pytest
@@ -186,10 +187,44 @@ def test_sync_messages_endpoint(monkeypatch):
 
 
 def test_process_document_unsupported_extension_raises_http_exception():
-    file = UploadFile(filename="bad.docx", file=io.BytesIO(b"hello"))
+    file = UploadFile(filename="bad.csv", file=io.BytesIO(b"hello"))
     with pytest.raises(HTTPException) as exc:
         asyncio.run(backend.process_document(BackgroundTasks(), file))
     assert exc.value.status_code == 400
+
+
+def test_process_document_supports_docx(monkeypatch):
+    document_bytes = io.BytesIO()
+    with zipfile.ZipFile(document_bytes, "w") as archive:
+        archive.writestr(
+            "word/document.xml",
+            (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                "<w:body><w:p><w:r><w:t>meeting notes</w:t></w:r></w:p></w:body></w:document>"
+            ),
+        )
+    document_bytes.seek(0)
+
+    file = UploadFile(filename="notes.docx", file=document_bytes)
+    monkeypatch.setattr(backend.utils, "generate_doc_id", lambda _text: "doc-123")
+    monkeypatch.setattr(
+        backend.services,
+        "extract_structured_data",
+        lambda _text, doc_id: {
+            "doc_id": doc_id,
+            "sender": "u1",
+            "receivers": ["u2"],
+            "subject": "Meeting Notes",
+            "content": "meeting notes",
+        },
+    )
+    monkeypatch.setattr(backend, "store_in_neo4j", lambda _data: True)
+
+    result = asyncio.run(backend.process_document(BackgroundTasks(), file))
+
+    assert result["success"] is True
+    assert result["doc_id"] == "doc-123"
 
 
 def test_process_document_returns_success_after_storage(monkeypatch):

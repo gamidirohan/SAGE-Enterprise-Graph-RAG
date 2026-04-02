@@ -433,7 +433,21 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
             session.run(
                 """
                 MERGE (d:Document {doc_id: $doc_id})
-                SET d.sender = $sender, d.subject = $subject, d.content = $content, d.embedding = $embedding, d.summary = $summary
+                SET d.sender = $sender,
+                    d.subject = $subject,
+                    d.content = $content,
+                    d.embedding = $embedding,
+                    d.summary = $summary,
+                    d.timestamp = $timestamp,
+                    d.source = $source,
+                    d.conversation_type = $conversation_type,
+                    d.conversation_id = $conversation_id,
+                    d.group_id = $group_id,
+                    d.attachment_name = $attachment_name,
+                    d.attachment_type = $attachment_type,
+                    d.attachment_url = $attachment_url,
+                    d.trace_json = $trace_json,
+                    d.graph_sync_status = $graph_sync_status
                 """,
                 doc_id=data["doc_id"],
                 sender=data["sender"],
@@ -441,6 +455,16 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
                 content=data["content"],
                 embedding=embedding,
                 summary=document_summary,
+                timestamp=data.get("timestamp"),
+                source=data.get("source"),
+                conversation_type=data.get("conversation_type"),
+                conversation_id=data.get("conversation_id"),
+                group_id=data.get("group_id"),
+                attachment_name=data.get("attachment_name"),
+                attachment_type=data.get("attachment_type"),
+                attachment_url=data.get("attachment_url"),
+                trace_json=data.get("trace_json"),
+                graph_sync_status=data.get("graph_sync_status"),
             )
 
             chunks = utils.chunk_document(data["content"], max_chunk_words=250, overlap_sentences=2)

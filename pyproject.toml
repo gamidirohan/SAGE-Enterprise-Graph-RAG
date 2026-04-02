@@ -5,6 +5,7 @@ description = "SAGE Enterprise Graph RAG backend, processing pipeline, and evalu
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
+    "bcrypt>=5.0.0",
     "bert-score",
     "fastapi",
     "langchain",

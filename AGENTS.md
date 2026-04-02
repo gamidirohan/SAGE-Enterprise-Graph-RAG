@@ -11,6 +11,7 @@ Purpose: keep agent work in this repo consistent, safe, and fast.
 
 ## 2) Environment and Config
 - Load env from repo-root `.env`.
+- For understanding, use `.env.example` if required.
 - Neo4j config should support:
   - `NEO4J_URI`
   - `NEO4J_USERNAME` (fallback: `NEO4J_USER`)

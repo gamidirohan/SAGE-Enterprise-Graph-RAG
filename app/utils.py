@@ -7,9 +7,11 @@ access, document chunking, and other reusable building blocks.
 import hashlib
 import os
 import re
+import zipfile
 from functools import lru_cache
 from pathlib import Path
 from typing import List
+from xml.etree import ElementTree
 
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
@@ -84,6 +86,24 @@ def extract_text_from_pdf(file_path) -> str:
     with open(file_path, "rb") as f:
         pdf_reader = PdfReader(f)
         return " ".join([page.extract_text() for page in pdf_reader.pages if page.extract_text()])
+
+
+def extract_text_from_docx(file_path) -> str:
+    with zipfile.ZipFile(file_path) as archive:
+        with archive.open("word/document.xml") as document_xml:
+            root = ElementTree.fromstring(document_xml.read())
+
+    paragraphs: List[str] = []
+    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    for paragraph in root.findall(".//w:p", namespace):
+        text_parts = [
+            node.text
+            for node in paragraph.findall(".//w:t", namespace)
+            if node.text
+        ]
+        if text_parts:
+            paragraphs.append("".join(text_parts))
+    return "\n".join(paragraphs)
 
 
 def chunk_document(text: str, max_chunk_words: int = 250, overlap_sentences: int = 2) -> List[str]:
