@@ -159,6 +159,7 @@ Notes:
 - Uploaded files are stored in `data/uploads/`.
 - Evaluation inputs live under `data/eval/`.
 - Message and attachment ingestion supports `PDF`, `TXT`, and `DOCX`.
+- Batch document ingestion skips already-ingested files by default using the document content hash as `doc_id`.
 - Chat messages persisted through the canonical flow store sender, receiver or group, timestamp, source, attachment metadata, trace, and graph sync status.
 
 ## Single Streamlit App
@@ -170,6 +171,7 @@ Notes:
 Common script entrypoints:
 
 ```bash
+uv run python scripts/batch_ingest_documents.py
 uv run python scripts/performance_comparison.py
 uv run python scripts/run_performance_comparison.py
 uv run python scripts/generate_report.py

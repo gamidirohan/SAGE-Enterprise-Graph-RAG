@@ -6,7 +6,6 @@ debugging in one place so the Streamlit workflow stays simple.
 
 from pathlib import Path
 import logging
-import re
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -18,9 +17,11 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
+    import app.document_ingestion as document_ingestion
     import app.services as services
     import app.utils as utils
 except ImportError:
+    import document_ingestion
     import services
     import utils
 
@@ -56,48 +57,6 @@ def summarize_with_optional_llm(llm, text: str) -> str:
     except Exception as exc:
         logger.warning(f"Groq summary failed, using fallback summary: {exc}")
         return summarize_text_fallback(text)
-
-
-def extract_id_mappings(file_path: str) -> List[Dict[str, str]]:
-    mappings: List[Dict[str, str]] = []
-    pattern = re.compile(r"^(EMP\d+)\s*:\s*(.*?)\s*\((.*?)\)\s*$")
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            for raw_line in f:
-                line = raw_line.strip()
-                if not line or line.lower().startswith("ids"):
-                    continue
-                match = pattern.match(line)
-                if match:
-                    emp_id, name, role = match.groups()
-                    mappings.append({"id": emp_id, "name": name, "role": role})
-    except Exception as exc:
-        logger.error(f"Error reading ID mappings from {file_path}: {exc}")
-    return mappings
-
-
-def upsert_id_mappings_to_neo4j(mappings: List[Dict[str, str]]) -> bool:
-    if not mappings:
-        return False
-    driver = get_neo4j_driver()
-    try:
-        with get_session(driver) as session:
-            for row in mappings:
-                session.run(
-                    """
-                    MERGE (p:Person {id: $id})
-                    SET p.name = $name, p.role = $role
-                    """,
-                    id=row["id"],
-                    name=row["name"],
-                    role=row["role"],
-                )
-        return True
-    except Exception as exc:
-        logger.error(f"Error upserting ID mappings to Neo4j: {exc}")
-        return False
-    finally:
-        driver.close()
 
 
 def extract_message_data(file_path: str) -> Dict[str, Any] | None:
@@ -288,8 +247,8 @@ def process_message_files(directory: str) -> List[Dict[str, Any]]:
     for file_path in file_paths:
         file_name = Path(file_path).name.lower()
         if "id mapping" in file_name:
-            mappings = extract_id_mappings(file_path)
-            if mappings and upsert_id_mappings_to_neo4j(mappings):
+            mappings = document_ingestion.extract_id_mappings(file_path)
+            if mappings and document_ingestion.upsert_id_mappings_to_neo4j(mappings):
                 logger.info(f"Successfully ingested {len(mappings)} ID mappings from {file_path}")
             continue
         data = extract_message_data(file_path)
@@ -312,21 +271,60 @@ def render_chat_tab():
 
 
 def render_document_tab():
-    st.subheader("Process One Document")
-    files_dir = utils.ROOT_DIR / "data" / "documents_ui"
-    if not files_dir.exists():
-        files_dir = utils.ROOT_DIR / "data" / "documents"
-    file_names = [p.name for p in files_dir.iterdir() if p.suffix.lower() in (".txt", ".pdf")] if files_dir.exists() else []
+    st.subheader("Document Ingestion")
+    files_dir = document_ingestion.default_document_directory()
+    document_files = document_ingestion.list_document_files(files_dir)
+    file_names = [path.name for path in document_files]
     if not file_names:
-        st.warning(f"No .txt or .pdf files found in directory: {files_dir}")
+        st.warning(f"No supported documents found in directory: {files_dir}")
         return
+
     selected_file = st.selectbox("Select a file", file_names)
-    if st.button("Process Document"):
-        file_path = files_dir / selected_file
-        document_text = utils.extract_text_from_pdf(file_path) if selected_file.endswith(".pdf") else file_path.read_text(encoding="utf-8")
-        structured_data = extract_structured_data(document_text, utils.generate_doc_id(document_text))
-        st.json(structured_data)
-        st.success("Processed")
+    file_path = files_dir / selected_file
+
+    if st.button("Preview Selected Document"):
+        payload = document_ingestion.build_document_payload(file_path)
+        st.json(
+            {
+                "doc_id": payload["doc_id"],
+                "sender": payload["sender"],
+                "receivers": payload["receivers"],
+                "subject": payload["subject"],
+                "source": payload["source"],
+            }
+        )
+
+    if st.button("Ingest Selected Document"):
+        result = document_ingestion.ingest_document_file(file_path, skip_existing=True)
+        if result["status"] == "stored":
+            st.success(f"Stored {result['subject']} in Neo4j.")
+        elif result["status"] == "skipped_duplicate":
+            st.info(f"Skipped duplicate document {result['subject']} based on content hash.")
+        else:
+            st.error(f"Failed to ingest {result['subject']}.")
+
+    st.divider()
+    st.subheader("Batch Document Ingestion")
+    batch_directory = st.text_input("Document directory", value=str(files_dir), key="document_batch_directory")
+    skip_existing = st.checkbox("Skip duplicates by content hash", value=True)
+    if st.button("Batch Ingest Documents"):
+        summary = document_ingestion.ingest_document_directory(batch_directory, skip_existing=skip_existing)
+        if not summary["exists"]:
+            st.error(f"Directory does not exist: {summary['directory']}")
+            return
+
+        st.success(
+            "Stored "
+            f"{summary['stored']} documents, skipped {summary['skipped_duplicates']} duplicates, "
+            f"failed {summary['failed']}."
+        )
+        if summary["mapping_entries_upserted"]:
+            st.info(
+                "Upserted "
+                f"{summary['mapping_entries_upserted']} people from {summary['mapping_files_processed']} mapping file(s)."
+            )
+        if summary["results"]:
+            st.json(summary["results"])
 
 
 def render_message_tab():
