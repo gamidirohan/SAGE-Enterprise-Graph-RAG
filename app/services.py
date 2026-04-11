@@ -84,18 +84,34 @@ DOCUMENT_EXTRACTION_PROMPT = ChatPromptTemplate.from_template(
 
 CHAT_PROMPT = ChatPromptTemplate.from_template(
     """
-    You are SAGE, an intelligent and friendly AI assistant specialized in retrieving and explaining information from documents.
-    Your tone is helpful, conversational, and slightly enthusiastic. You refer to yourself as "I" and address the user directly.
+    You are SAGE, an enterprise Graph-RAG assistant.
+    SAGE proves answers instead of giving conversational fluff.
+    Your tone is precise, calm, professional, and evidence-driven.
+    Do not sound casual, overly enthusiastic, or vague.
 
-    When answering questions:
-    - Be concise but thorough
-    - Use a friendly, conversational tone
-    - If you're not sure about something, be honest about it
-    - Occasionally use phrases like "I found" or "According to the documents" to emphasize your retrieval capabilities
-    - Format your responses in a readable way with paragraphs and bullet points when appropriate
-    - If the context includes names, dates, document IDs, or senders, mention them explicitly
+    Answering style:
+    - Lead with the direct answer first
+    - Then show the supporting evidence in a structured way
+    - Use short sections such as `Answer`, `Findings`, and `Evidence and Provenance` when useful
+    - If the user asks for a list, violations, approvals, delays, responsibility, policy checks, or audit-style output, prefer a numbered findings format
+    - Mention names, dates, document IDs, senders, timestamps, relationships, and policy references explicitly when they are present in the context
     - Do not replace a known person with vague phrases like "someone" or "a person"
-    - If the evidence is weak or incomplete, say that clearly instead of overstating confidence
+    - If evidence is incomplete, weak, or missing, say that clearly instead of overstating confidence
+    - Separate confirmed facts from inference
+    - Do not invent graph paths, document IDs, policy IDs, timestamps, Cypher queries, approvals, or reasoning steps that are not supported by the provided context
+
+    Preferred response shape:
+    - For direct managerial questions, start with `Answer:` followed by 1 concise paragraph
+    - Then add `Evidence and Provenance:` with flat bullet points summarizing the strongest support
+    - For audit/compliance or multi-result queries, start with `Findings:` and enumerate the results
+    - After the findings, add `Evidence and Provenance:` with the supporting references
+    - If a requested provenance item is not available from the retrieved context, say `Not available in retrieved evidence`
+
+    Writing standard:
+    - Be concise, but make the reasoning traceable
+    - Prefer operational clarity over conversational warmth
+    - Sound like a system built for managers, auditors, and enterprise review
+    - Avoid filler language, hedging that adds no value, or generic assistant phrases
 
     Here is the user's question: {query}
 
@@ -105,7 +121,7 @@ CHAT_PROMPT = ChatPromptTemplate.from_template(
     Here is the relevant context from the documents (keep in mind you get limited context and that's what you should work with):
     {context}
 
-    Respond to the user's question in a helpful, conversational way based on the context provided:
+    Respond to the user's question in that enterprise, evidence-driven style using only the context provided:
     """
 )
 
@@ -415,20 +431,55 @@ def _summarize_with_optional_llm(llm, text: str) -> str:
         return _summarize_text_fallback(text)
 
 
+_SHORT_CONTENT_CHAR_LIMIT = 500
+_SHORT_CONTENT_WORD_LIMIT = 200
+
+
+def _document_exists(session, doc_id: str) -> bool:
+    """Fast check: does a Document node with this doc_id already exist?"""
+    rows = session.run(
+        "MATCH (d:Document {doc_id: $doc_id}) RETURN d.doc_id AS id LIMIT 1",
+        doc_id=doc_id,
+    ).data()
+    return bool(rows)
+
+
+def _smart_summarize(llm, content: str) -> str:
+    """Skip expensive LLM summarization for short content (e.g. chat messages).
+
+    For text under _SHORT_CONTENT_CHAR_LIMIT characters, the content itself
+    is a perfectly adequate summary. LLM summarization is reserved for longer
+    documents where compression actually adds value.
+    """
+    if len(content) <= _SHORT_CONTENT_CHAR_LIMIT:
+        return _summarize_text_fallback(content)
+    return _summarize_with_optional_llm(llm, content)
+
+
 def store_in_neo4j(data: Dict[str, Any]) -> bool:
     driver = utils.create_neo4j_driver()
-    llm = None
-    if utils.GROQ_API_KEY:
-        try:
-            llm = _create_groq_client(temperature=0.0, require_json=True)
-        except Exception as exc:
-            logger.warning(f"Failed to initialize Groq client, using fallback summaries: {exc}")
-    else:
-        logger.warning("GROQ_API_KEY not found. Falling back to local summaries for ingestion.")
 
     try:
         with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
-            document_summary = _summarize_with_optional_llm(llm, data["content"])
+            # ── Optimization 1: skip entirely if document already ingested ──
+            if _document_exists(session, data["doc_id"]):
+                logger.debug("Document %s already exists, skipping ingestion.", data["doc_id"])
+                return True
+
+            # ── Lazy LLM init: only create when we actually need it ──
+            llm = None
+            content = data["content"]
+            needs_llm = len(content) > _SHORT_CONTENT_CHAR_LIMIT
+            if needs_llm and utils.GROQ_API_KEY:
+                try:
+                    llm = _create_groq_client(temperature=0.0, require_json=True)
+                except Exception as exc:
+                    logger.warning(f"Failed to initialize Groq client, using fallback summaries: {exc}")
+            elif needs_llm:
+                logger.warning("GROQ_API_KEY not found. Falling back to local summaries for ingestion.")
+
+            # ── Optimization 2: smart summarization ──
+            document_summary = _smart_summarize(llm, content)
             embedding = utils.generate_embedding(document_summary[:5000])
             session.run(
                 """
@@ -452,7 +503,7 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
                 doc_id=data["doc_id"],
                 sender=data["sender"],
                 subject=data["subject"],
-                content=data["content"],
+                content=content,
                 embedding=embedding,
                 summary=document_summary,
                 timestamp=data.get("timestamp"),
@@ -467,10 +518,11 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
                 graph_sync_status=data.get("graph_sync_status"),
             )
 
-            chunks = utils.chunk_document(data["content"], max_chunk_words=250, overlap_sentences=2)
-            for i, chunk in enumerate(chunks):
-                chunk_summary = _summarize_with_optional_llm(llm, chunk)
-                chunk_embedding = utils.generate_embedding(chunk_summary)
+            # ── Optimization 3: skip chunking for short content ──
+            word_count = len(content.split())
+            if word_count <= _SHORT_CONTENT_WORD_LIMIT:
+                # Short content: store as a single chunk, no splitting needed
+                chunk_embedding = utils.generate_embedding(document_summary)
                 session.run(
                     """
                     MERGE (c:Chunk {chunk_id: $chunk_id})
@@ -478,12 +530,31 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
                     MERGE (d:Document {doc_id: $doc_id})
                     MERGE (c)-[:PART_OF]->(d)
                     """,
-                    chunk_id=f"{data['doc_id']}-chunk-{i}",
-                    content=chunk,
+                    chunk_id=f"{data['doc_id']}-chunk-0",
+                    content=content,
                     embedding=chunk_embedding,
-                    summary=chunk_summary,
+                    summary=document_summary,
                     doc_id=data["doc_id"],
                 )
+            else:
+                # Long content: full chunking pipeline with LLM summaries
+                chunks = utils.chunk_document(content, max_chunk_words=250, overlap_sentences=2)
+                for i, chunk in enumerate(chunks):
+                    chunk_summary = _smart_summarize(llm, chunk)
+                    chunk_embedding = utils.generate_embedding(chunk_summary)
+                    session.run(
+                        """
+                        MERGE (c:Chunk {chunk_id: $chunk_id})
+                        SET c.content = $content, c.embedding = $embedding, c.summary = $summary
+                        MERGE (d:Document {doc_id: $doc_id})
+                        MERGE (c)-[:PART_OF]->(d)
+                        """,
+                        chunk_id=f"{data['doc_id']}-chunk-{i}",
+                        content=chunk,
+                        embedding=chunk_embedding,
+                        summary=chunk_summary,
+                        doc_id=data["doc_id"],
+                    )
 
             session.run(
                 """
