@@ -8,21 +8,24 @@ import json
 import logging
 import shutil
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from neo4j.exceptions import ServiceUnavailable, SessionExpired
 from pydantic import BaseModel, Field
 
 try:
     import app.chat_store as chat_store
+    import app.saia as saia
     import app.services as services
     import app.utils as utils
 except ImportError:
     import chat_store
+    import saia
     import services
     import utils
 
@@ -53,8 +56,26 @@ class ChatRequest(BaseModel):
     user_id: Optional[str] = None
 
 
+class AnswerPayload(BaseModel):
+    schema_version: Literal[1] = 1
+    mode: Literal["short", "long"]
+    reason_code: Literal[
+        "explicit_short",
+        "explicit_long",
+        "direct_lookup",
+        "broad_or_explanatory",
+        "evidence_complexity",
+        "fallback_invalid_json",
+    ]
+    summary: str
+    bullets: List[str] = Field(default_factory=list)
+    explanation: str
+    evidence_refs: List[str] = Field(default_factory=list)
+
+
 class ChatResponse(BaseModel):
     answer: str
+    answer_payload: AnswerPayload
     thinking: List[str] = Field(default_factory=list)
     trace: Dict[str, Any] = Field(default_factory=dict)
 
@@ -102,6 +123,8 @@ class ChatMessageSyncItem(BaseModel):
     attachment: Optional[Dict[str, Any]] = None
     trace: Optional[Dict[str, Any]] = None
     thinking: Optional[List[str]] = Field(default_factory=list)
+    answerPayload: Optional[AnswerPayload] = None
+    conversationId: Optional[str] = None
     conversationType: Optional[str] = None
     groupId: Optional[str] = None
     syncToGraph: bool = True
@@ -166,6 +189,7 @@ class ConversationMessageRequest(BaseModel):
     attachment: Optional[Dict[str, Any]] = None
     trace: Optional[Dict[str, Any]] = None
     thinking: List[str] = Field(default_factory=list)
+    answerPayload: Optional[AnswerPayload] = None
     role: Optional[str] = None
     isAiResponse: bool = False
     syncToGraph: bool = True
@@ -180,6 +204,14 @@ def _require_user_id(x_user_id: Optional[str]) -> str:
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _raise_graph_unavailable(operation: str, exc: Exception) -> None:
+    logger.error("%s failed because Neo4j is unavailable: %s", operation, exc)
+    raise HTTPException(
+        status_code=503,
+        detail=f"Graph database is unavailable while {operation}. Check Neo4j connectivity and try again.",
+    ) from exc
 
 
 def _extract_document_text(file_path: Path, filename: str) -> str:
@@ -214,6 +246,45 @@ def _parse_receiver_ids(receiver_id: Optional[str], receiver_ids_json: Optional[
     if isinstance(receiver_id, str) and receiver_id:
         return [receiver_id]
     return []
+
+
+def _is_sage_graph_ineligible_message(
+    *,
+    sender_id: Optional[str],
+    receiver_id: Optional[str],
+    conversation_type: Optional[str],
+    source: Optional[str],
+    is_ai_response: bool,
+) -> bool:
+    normalized_source = (source or "").strip().lower()
+    normalized_conversation_type = (conversation_type or "").strip().lower()
+    if normalized_conversation_type == "sage":
+        return True
+    if sender_id == chat_store.SAGE_USER_ID or receiver_id == chat_store.SAGE_USER_ID:
+        return True
+    if normalized_source.startswith("sage_"):
+        return True
+    return bool(is_ai_response and sender_id == chat_store.SAGE_USER_ID)
+
+
+def _derive_conversation_id(
+    *,
+    sender_id: Optional[str],
+    receiver_id: Optional[str],
+    conversation_id: Optional[str],
+    conversation_type: Optional[str],
+    group_id: Optional[str],
+) -> Optional[str]:
+    if conversation_id:
+        return conversation_id
+    if conversation_type == "group" and group_id:
+        return chat_store.stable_group_conversation_id(group_id)
+    if conversation_type == "sage":
+        owner_id = receiver_id if sender_id == chat_store.SAGE_USER_ID else sender_id
+        return chat_store.stable_sage_conversation_id(owner_id) if owner_id else None
+    if sender_id and receiver_id:
+        return chat_store.stable_direct_conversation_id(sender_id, receiver_id)
+    return None
 
 
 def _build_document_payload(
@@ -252,6 +323,13 @@ def _build_document_payload(
     subject = normalized_attachment_name or filename or structured.get("subject") or "Uploaded document"
     sender = normalized_sender_id or structured.get("sender") or "Unknown"
     actual_source = normalized_source or ("message_attachment" if normalized_linked_message_id else "document_upload")
+    actual_conversation_id = _derive_conversation_id(
+        sender_id=sender,
+        receiver_id=normalized_receiver_id,
+        conversation_id=normalized_conversation_id,
+        conversation_type=normalized_conversation_type,
+        group_id=normalized_group_id,
+    )
     return {
         "doc_id": doc_id,
         "sender": sender,
@@ -261,11 +339,13 @@ def _build_document_payload(
         "timestamp": normalized_sent_at or _utcnow_iso(),
         "source": actual_source,
         "conversation_type": normalized_conversation_type,
-        "conversation_id": normalized_conversation_id,
+        "conversation_id": actual_conversation_id,
         "group_id": normalized_group_id,
         "attachment_name": normalized_attachment_name or filename,
         "attachment_type": normalized_attachment_type,
         "attachment_url": normalized_attachment_url,
+        "origin_message_id": normalized_linked_message_id,
+        "linked_message_id": normalized_linked_message_id,
         "trace_json": None,
         "graph_sync_status": chat_store.GRAPH_SYNC_READY,
     }
@@ -284,7 +364,22 @@ def store_chat_message_in_neo4j(message: ChatMessageSyncItem) -> bool:
     content = (message.content or "").strip()
     if not content or not message.syncToGraph:
         return False
+    if _is_sage_graph_ineligible_message(
+        sender_id=message.senderId,
+        receiver_id=message.receiverId,
+        conversation_type=message.conversationType,
+        source=message.source,
+        is_ai_response=False,
+    ):
+        return False
     try:
+        conversation_id = _derive_conversation_id(
+            sender_id=message.senderId,
+            receiver_id=message.receiverId,
+            conversation_id=message.conversationId,
+            conversation_type=message.conversationType,
+            group_id=message.groupId,
+        )
         payload = {
             "doc_id": f"chat-msg-{message.id}",
             "sender": message.senderId,
@@ -294,14 +389,36 @@ def store_chat_message_in_neo4j(message: ChatMessageSyncItem) -> bool:
             "timestamp": message.timestamp,
             "source": message.source or "chat_message",
             "conversation_type": message.conversationType,
+            "conversation_id": conversation_id,
             "group_id": message.groupId,
             "attachment_name": (message.attachment or {}).get("name"),
             "attachment_type": (message.attachment or {}).get("type"),
             "attachment_url": (message.attachment or {}).get("url"),
+            "origin_message_id": message.id,
+            "linked_message_id": None,
             "trace_json": json.dumps(message.trace) if message.trace else None,
             "graph_sync_status": chat_store.GRAPH_SYNC_READY,
         }
-        return store_in_neo4j(payload)
+        stored = store_in_neo4j(payload)
+        if stored:
+            try:
+                saia.process_chat_message(
+                    message_id=message.id,
+                    sender_id=message.senderId,
+                    receiver_ids=payload["receivers"],
+                    conversation_id=conversation_id,
+                    conversation_type=message.conversationType,
+                    group_id=message.groupId,
+                    sent_at=message.timestamp,
+                    content=content,
+                    source=message.source or "chat_message",
+                    trace=message.trace,
+                    is_ai_response=False,
+                    attachment_name=(message.attachment or {}).get("name"),
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error("SAIA processing failed for synced message %s: %s", message.id, exc)
+        return stored
     except Exception as exc:
         logger.error("Failed to sync message %s: %s", message.id, exc)
         return False
@@ -309,11 +426,14 @@ def store_chat_message_in_neo4j(message: ChatMessageSyncItem) -> bool:
 
 @app.post("/api/bootstrap")
 async def bootstrap_endpoint(request: BootstrapRequest):
-    result = chat_store.bootstrap_seed_data(
-        users=request.users,
-        groups=[group.model_dump() for group in request.groups],
-        messages=request.messages,
-    )
+    try:
+        result = chat_store.bootstrap_seed_data(
+            users=request.users,
+            groups=[group.model_dump() for group in request.groups],
+            messages=request.messages,
+        )
+    except (ServiceUnavailable, SessionExpired) as exc:
+        _raise_graph_unavailable("bootstrapping seed data", exc)
     return {"success": True, **result}
 
 
@@ -407,6 +527,31 @@ async def mark_message_read_endpoint(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
+@app.get("/api/messages/{message_id}/saia")
+async def get_message_saia_insight_endpoint(
+    message_id: str,
+    x_user_id: Optional[str] = Header(default=None),
+):
+    user_id = _require_user_id(x_user_id)
+    driver = utils.create_neo4j_driver()
+    try:
+        with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
+            access_rows = session.run(
+                """
+                MATCH (u:User {id: $user_id})-[:PARTICIPATES_IN]->(:Conversation)<-[:IN_CONVERSATION]-(m:Message {id: $message_id})
+                RETURN m.id AS id
+                LIMIT 1
+                """,
+                user_id=user_id,
+                message_id=message_id,
+            ).data()
+            if not access_rows:
+                raise HTTPException(status_code=403, detail="Message not found or access denied")
+            return saia.collect_message_insight(session, message_id)
+    finally:
+        driver.close()
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     message = request.message.strip()
@@ -414,11 +559,26 @@ async def chat_endpoint(request: ChatRequest):
         raise HTTPException(status_code=400, detail="Message is required")
 
     graph_result = query_graph_with_trace(message, user_id=request.user_id)
-    ai_result = generate_groq_response(message, graph_result.get("documents") or [], user_id=request.user_id)
+    ai_result = generate_groq_response(
+        message,
+        graph_result.get("documents") or [],
+        user_id=request.user_id,
+        retrieval_trace=graph_result.get("trace"),
+    )
     trace = {**(graph_result.get("trace") or {}), **((ai_result.get("trace") or {}) if isinstance(ai_result, dict) else {})}
+    answer_payload = ai_result.get("answer_payload") or {
+        "schema_version": 1,
+        "mode": "short",
+        "reason_code": "fallback_invalid_json",
+        "summary": ai_result.get("answer", "") or "I couldn't produce a readable answer from the available evidence.",
+        "bullets": [],
+        "explanation": "SAGE returned a safe short answer because the detailed response could not be formatted reliably.",
+        "evidence_refs": services._derive_evidence_refs(retrieval_trace=trace),
+    }
 
     return {
-        "answer": ai_result.get("answer", ""),
+        "answer": answer_payload.get("summary", ai_result.get("answer", "")),
+        "answer_payload": answer_payload,
         "thinking": ai_result.get("thinking") or [],
         "trace": trace,
     }
@@ -478,6 +638,24 @@ async def process_document(
 
         if not store_in_neo4j(payload):
             raise HTTPException(status_code=500, detail="Failed to store document in the graph database.")
+
+        if payload["source"] == "message_attachment" and normalized_linked_message_id:
+            try:
+                saia.process_message_attachment(
+                    doc_id=payload["doc_id"],
+                    linked_message_id=normalized_linked_message_id,
+                    sender_id=payload["sender"],
+                    receiver_ids=payload["receivers"],
+                    conversation_id=payload["conversation_id"],
+                    conversation_type=payload["conversation_type"],
+                    group_id=payload["group_id"],
+                    sent_at=payload["timestamp"],
+                    content=payload["content"],
+                    source=payload["source"],
+                    attachment_name=payload["attachment_name"],
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error("SAIA processing failed for attachment %s: %s", payload["doc_id"], exc)
 
         return {
             "doc_id": payload["doc_id"],

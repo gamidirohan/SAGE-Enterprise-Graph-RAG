@@ -52,6 +52,12 @@ source .venv/bin/activate
 uv sync
 ```
 
+If you need to verify existing bcrypt password hashes, install the optional legacy auth extra instead of the default dependency set:
+
+```bash
+uv sync --extra legacy-auth
+```
+
 ## Environment Variables
 
 Create a `.env` file with at least:
@@ -69,6 +75,7 @@ Useful optional backend settings:
 ```env
 GROQ_MODEL=llama-3.1-8b-instant
 EMBEDDING_MODEL=sentence-transformers/all-mpnet-base-v2
+SAIA_ENABLED=false
 ```
 
 Important note:
@@ -91,6 +98,8 @@ uv run python app/backend.py
 ```
 
 Default URL: `http://localhost:8000`
+
+If `uv` complains about `unrecognized subcommand 'app/backend.py'`, the missing piece is `run`. The default install uses the built-in PBKDF2 password fallback; use `uv sync --extra legacy-auth` only if you need legacy bcrypt-hash verification.
 
 Useful endpoints:
 - `GET /api/health`
@@ -203,9 +212,15 @@ Frontend verification:
 
 ```bash
 cd ../ChatAppSAGE
+npm run lint
+npx tsc --noEmit
 npm run build
 node --check websocket-server.js
 ```
+
+Note:
+- `npm run lint` uses ESLint when the frontend has `eslint` and `eslint-config-next` installed.
+- In restricted/offline environments, the frontend lint script falls back to Next.js build/type validation so there is still a non-interactive verification path.
 
 ## Status
 

@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
+import secrets
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 from uuid import uuid4
 
-import bcrypt
+try:
+    import bcrypt
+except ImportError:  # pragma: no cover - exercised in dependency-light test environments
+    bcrypt = None
 
 try:
+    import app.saia as saia
     import app.services as services
     import app.utils as utils
 except ImportError:
+    import saia
     import services
     import utils
 
@@ -45,10 +53,36 @@ def stable_group_conversation_id(group_id: str) -> str:
 
 
 def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    if bcrypt is not None:
+        return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        200_000,
+    ).hex()
+    return f"pbkdf2_sha256${salt}${digest}"
 
 
 def verify_password(password: str, password_hash: str) -> bool:
+    if password_hash.startswith("pbkdf2_sha256$"):
+        try:
+            _scheme, salt, digest = password_hash.split("$", 2)
+        except ValueError:
+            return False
+        candidate = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            200_000,
+        ).hex()
+        return hmac.compare_digest(candidate, digest)
+
+    if bcrypt is None:
+        logger.warning("bcrypt is unavailable; cannot verify legacy bcrypt password hashes.")
+        return False
     try:
         return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
     except ValueError:
@@ -80,6 +114,18 @@ def _serialize_attachment(attachment: Optional[Dict[str, Any]]) -> Optional[Dict
     }
 
 
+def _deserialize_json_object(raw: Any) -> Optional[Dict[str, Any]]:
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _deserialize_message(record: Dict[str, Any]) -> Dict[str, Any]:
     attachment_name = record.get("attachment_name")
     attachment = None
@@ -92,13 +138,8 @@ def _deserialize_message(record: Dict[str, Any]) -> Dict[str, Any]:
             "url": record.get("attachment_url"),
         }
 
-    trace = None
-    trace_json = record.get("trace_json")
-    if trace_json:
-        try:
-            trace = json.loads(trace_json)
-        except json.JSONDecodeError:
-            trace = None
+    trace = _deserialize_json_object(record.get("trace_json"))
+    answer_payload = _deserialize_json_object(record.get("answer_payload_json"))
 
     thinking = record.get("thinking") or []
     return {
@@ -116,6 +157,7 @@ def _deserialize_message(record: Dict[str, Any]) -> Dict[str, Any]:
         "role": record.get("role"),
         "isAiResponse": bool(record.get("is_ai_response")),
         "thinking": list(thinking),
+        "answerPayload": answer_payload,
         "trace": trace,
         "attachment": attachment,
     }
@@ -344,9 +386,30 @@ def _build_document_payload(
         "attachment_name": attachment.get("name"),
         "attachment_type": attachment.get("type"),
         "attachment_url": attachment.get("url"),
+        "origin_message_id": message_id,
+        "linked_message_id": None,
         "trace_json": json.dumps(trace) if trace else None,
         "graph_sync_status": message.get("graphSyncStatus") or GRAPH_SYNC_READY,
     }
+
+
+def _is_graph_ineligible_message(
+    *,
+    conversation_type: Optional[str],
+    sender_id: Optional[str],
+    receiver_id: Optional[str],
+    source: Optional[str],
+    is_ai_response: bool,
+) -> bool:
+    normalized_source = (source or "").strip().lower()
+    normalized_conversation_type = (conversation_type or "").strip().lower()
+    if normalized_conversation_type == "sage":
+        return True
+    if sender_id == SAGE_USER_ID or receiver_id == SAGE_USER_ID:
+        return True
+    if normalized_source.startswith("sage_"):
+        return True
+    return bool(is_ai_response and sender_id == SAGE_USER_ID)
 
 
 def _sync_message_to_graph(
@@ -359,6 +422,14 @@ def _sync_message_to_graph(
         return GRAPH_SYNC_SKIPPED
     if not message.get("syncToGraph", True):
         return GRAPH_SYNC_SKIPPED
+    if _is_graph_ineligible_message(
+        conversation_type=conversation.get("type"),
+        sender_id=message.get("senderId"),
+        receiver_id=message.get("receiverId"),
+        source=message.get("source"),
+        is_ai_response=bool(message.get("isAiResponse")),
+    ):
+        return GRAPH_SYNC_SKIPPED
 
     participant_ids = _conversation_member_ids(session, conversation["id"])
     receiver_ids = [
@@ -370,9 +441,26 @@ def _sync_message_to_graph(
         receiver_ids = [message.get("receiverId") or message["senderId"]]
 
     try:
-        ok = services.store_in_neo4j(
-            _build_document_payload(message_id, message, conversation, receiver_ids)
-        )
+        payload = _build_document_payload(message_id, message, conversation, receiver_ids)
+        ok = services.store_in_neo4j(payload)
+        if ok:
+            try:
+                saia.process_chat_message(
+                    message_id=message_id,
+                    sender_id=message["senderId"],
+                    receiver_ids=receiver_ids,
+                    conversation_id=conversation.get("id"),
+                    conversation_type=conversation.get("type"),
+                    group_id=conversation.get("group_id"),
+                    sent_at=message.get("sentAt"),
+                    content=message.get("content") or "",
+                    source=message.get("source") or "chat_message",
+                    trace=message.get("trace"),
+                    is_ai_response=bool(message.get("isAiResponse")),
+                    attachment_name=(message.get("attachment") or {}).get("name"),
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error("SAIA processing failed for message %s: %s", message_id, exc)
     except Exception as exc:  # pragma: no cover - defensive
         logger.error("Graph sync failed for message %s: %s", message_id, exc)
         ok = False
@@ -402,12 +490,23 @@ def create_message(
     content = payload.get("content") or ""
     source = payload.get("source") or "chat_message"
     thinking = payload.get("thinking") or []
+    answer_payload = payload.get("answerPayload")
     trace = payload.get("trace")
     role = payload.get("role") or ("assistant" if payload.get("isAiResponse") else "user")
     receiver_id = payload.get("receiverId")
     group_id = payload.get("groupId") or conversation.get("group_id")
 
-    should_sync_to_graph = bool((content or "").strip()) and payload.get("syncToGraph", True)
+    should_sync_to_graph = (
+        bool((content or "").strip())
+        and payload.get("syncToGraph", True)
+        and not _is_graph_ineligible_message(
+            conversation_type=conversation.get("type"),
+            sender_id=sender_id,
+            receiver_id=receiver_id,
+            source=source,
+            is_ai_response=bool(payload.get("isAiResponse")),
+        )
+    )
     graph_sync_status = GRAPH_SYNC_PENDING if should_sync_to_graph else GRAPH_SYNC_SKIPPED
 
     session.run(
@@ -427,6 +526,7 @@ def create_message(
             m.role = $role,
             m.is_ai_response = $is_ai_response,
             m.thinking = $thinking,
+            m.answer_payload_json = $answer_payload_json,
             m.trace_json = $trace_json,
             m.attachment_id = $attachment_id,
             m.attachment_name = $attachment_name,
@@ -450,6 +550,7 @@ def create_message(
         role=role,
         is_ai_response=bool(payload.get("isAiResponse")),
         thinking=list(thinking),
+        answer_payload_json=json.dumps(answer_payload) if answer_payload else None,
         trace_json=json.dumps(trace) if trace else None,
         attachment_id=attachment.get("id") if attachment else None,
         attachment_name=attachment.get("name") if attachment else None,
@@ -470,6 +571,7 @@ def create_message(
                 "source": source,
                 "attachment": attachment,
                 "trace": trace,
+                "isAiResponse": bool(payload.get("isAiResponse")),
                 "graphSyncStatus": payload.get("graphSyncStatus"),
                 "syncToGraph": payload.get("syncToGraph", True),
             },
@@ -526,6 +628,7 @@ def create_message(
         "role": role,
         "is_ai_response": bool(payload.get("isAiResponse")),
         "thinking": list(thinking),
+        "answer_payload_json": json.dumps(answer_payload) if answer_payload else None,
         "trace_json": json.dumps(trace) if trace else None,
         "attachment_id": attachment.get("id") if attachment else None,
         "attachment_name": attachment.get("name") if attachment else None,
@@ -690,6 +793,7 @@ def bootstrap_seed_data(
                             "attachment": message.get("attachment"),
                             "trace": message.get("trace"),
                             "thinking": message.get("thinking") or [],
+                            "answerPayload": message.get("answerPayload"),
                             "role": message.get("role"),
                             "isAiResponse": bool(message.get("isAiResponse")),
                             "syncToGraph": not bool(message.get("skipGraphSync")),
@@ -986,6 +1090,7 @@ def list_conversation_summaries(user_id: str) -> List[Dict[str, Any]]:
                         "avatar": avatar,
                         "unreadCount": int(row.get("unread_count") or 0),
                         "groupId": row.get("group_id"),
+                        "participants": participants,
                         "participantIds": [item.get("id") for item in participants if item.get("id")],
                         "otherUser": other_user,
                         "lastMessage": {
@@ -1032,6 +1137,7 @@ def get_conversation_messages(user_id: str, conversation_id: str) -> List[Dict[s
                            m.role AS role,
                            m.is_ai_response AS is_ai_response,
                            m.thinking AS thinking,
+                           m.answer_payload_json AS answer_payload_json,
                            m.trace_json AS trace_json,
                            m.attachment_id AS attachment_id,
                            m.attachment_name AS attachment_name,

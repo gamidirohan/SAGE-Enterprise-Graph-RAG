@@ -4,6 +4,7 @@ Use this file for prompt templates, document extraction, graph retrieval,
 chat response generation, and other domain-level application behavior.
 """
 
+import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
@@ -24,6 +25,8 @@ logger = logging.getLogger(__name__)
 GRAPH_VECTOR_QUERY = """
     MATCH (c:Chunk)-[:PART_OF]->(d:Document)
     WHERE c.embedding IS NOT NULL
+      AND coalesce(d.conversation_type, '') <> 'sage'
+      AND NOT coalesce(d.source, '') STARTS WITH 'sage_'
     WITH c, d, c.embedding AS chunk_embedding, $query_embedding AS query_embedding
     WITH c, d, gds.similarity.cosine(chunk_embedding, query_embedding) AS similarity
     ORDER BY similarity DESC
@@ -36,6 +39,8 @@ PERSON_GRAPH_VECTOR_QUERY = """
     MATCH (p:Person {id: $user_id})
     MATCH (p)-[:SENT|RECEIVED_BY]-(d:Document)<-[:PART_OF]-(c:Chunk)
     WHERE c.embedding IS NOT NULL
+      AND coalesce(d.conversation_type, '') <> 'sage'
+      AND NOT coalesce(d.source, '') STARTS WITH 'sage_'
     WITH c, d, c.embedding AS chunk_embedding, $query_embedding AS query_embedding
     WITH c, d, gds.similarity.cosine(chunk_embedding, query_embedding) AS similarity
     ORDER BY similarity DESC
@@ -44,7 +49,181 @@ PERSON_GRAPH_VECTOR_QUERY = """
     RETURN c.chunk_id AS chunk_id, c.summary AS chunk_summary, d, similarity, type(r) as relationship, n
 """
 
+FACT_VECTOR_QUERY = """
+    MATCH (f:CanonicalFact)
+    WHERE f.status = 'current' AND f.embedding IS NOT NULL
+    WITH f, f.embedding AS fact_embedding, $query_embedding AS query_embedding
+    WITH f, gds.similarity.cosine(fact_embedding, query_embedding) AS similarity
+    ORDER BY similarity DESC
+    LIMIT 3
+    OPTIONAL MATCH (f)<-[:SUPPORTS]-(claim:Claim)<-[:HAS_CLAIM]-(d:Document)
+    WITH f, similarity, collect(DISTINCT d)[0] AS d
+    RETURN f.fact_id AS fact_id, f.summary AS fact_summary, f, d, similarity
+"""
+
+PERSON_FACT_VECTOR_QUERY = """
+    MATCH (p:Person {id: $user_id})-[:HAS_FACT]-(f:CanonicalFact)
+    WHERE f.status = 'current' AND f.embedding IS NOT NULL
+    WITH f, f.embedding AS fact_embedding, $query_embedding AS query_embedding
+    WITH f, gds.similarity.cosine(fact_embedding, query_embedding) AS similarity
+    ORDER BY similarity DESC
+    LIMIT 3
+    OPTIONAL MATCH (f)<-[:SUPPORTS]-(claim:Claim)<-[:HAS_CLAIM]-(d:Document)
+    WITH f, similarity, collect(DISTINCT d)[0] AS d
+    RETURN f.fact_id AS fact_id, f.summary AS fact_summary, f, d, similarity
+"""
+
+PERSON_TASK_FACT_QUERY = """
+    MATCH (f:CanonicalFact)
+    WHERE f.status = 'current'
+      AND f.claim_type IN $claim_types
+      AND (
+        f.subject_entity_id = $user_id
+        OR f.subject_key = $user_id
+        OR f.object_entity_id = $user_id
+        OR f.object_key = $user_id
+      )
+    OPTIONAL MATCH (f)<-[:SUPPORTS]-(claim:Claim)<-[:HAS_CLAIM]-(d:Document)
+    WITH f, collect(DISTINCT d)[0] AS d
+    RETURN f.fact_id AS fact_id, f.summary AS fact_summary, f, d, 1.0 AS similarity
+    ORDER BY coalesce(f.last_seen_at, f.first_seen_at, '') DESC
+    LIMIT 5
+"""
+
 FIRST_PERSON_PATTERN = re.compile(r"\b(i|me|my|mine|myself)\b", re.IGNORECASE)
+TASK_LOOKUP_PATTERN = re.compile(
+    r"\b("
+    r"promise|promised|commit|committed|commitment|agreed|supposed to|meant to|"
+    r"assigned|assignment|working on|responsible for|deadline|due|by when|"
+    r"send|share|deliver|submit|upload|provide|finish|complete"
+    r")\b",
+    re.IGNORECASE,
+)
+TASK_LIKE_FACT_TYPES = {"TASK_ASSIGNMENT", "ASSIGNMENT_STATE", "MEETING_EVENT"}
+FACT_PRIORITY_QUERY_TYPES = {"task_commitment_lookup"}
+ANSWER_PAYLOAD_SCHEMA_VERSION = 1
+ANSWER_MODE_SHORT = "short"
+ANSWER_MODE_LONG = "long"
+REASON_CODE_EXPLICIT_SHORT = "explicit_short"
+REASON_CODE_EXPLICIT_LONG = "explicit_long"
+REASON_CODE_DIRECT_LOOKUP = "direct_lookup"
+REASON_CODE_BROAD_OR_EXPLANATORY = "broad_or_explanatory"
+REASON_CODE_EVIDENCE_COMPLEXITY = "evidence_complexity"
+REASON_CODE_FALLBACK_INVALID_JSON = "fallback_invalid_json"
+
+SHORT_OVERRIDE_PHRASES = (
+    "brief",
+    "short",
+    "quick answer",
+    "one line",
+    "tl;dr",
+)
+LONG_OVERRIDE_PHRASES = (
+    "detailed",
+    "explain",
+    "walk me through",
+    "summarize",
+    "summary",
+    "compare",
+    "audit",
+    "anything about",
+    "everything",
+    "provenance",
+    "all mentions",
+    "overview",
+)
+BROAD_SCOPE_PHRASES = (
+    "anything about",
+    "everything",
+    "all mentions",
+    "overview",
+    "walk me through",
+    "all dashboard-related conversations",
+    "everything we know",
+)
+DIRECT_LOOKUP_PREFIX = re.compile(r"^\s*(who|whom|what|when|which|did|do|does|is|are|was|were|am|can)\b", re.IGNORECASE)
+QUERY_NAME_PATTERN = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b")
+QUERY_EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+QUERY_TOKEN_PATTERN = re.compile(r"\b[a-zA-Z][a-zA-Z0-9_\-]{2,}\b")
+QUERY_FOCUS_STOPWORDS = {
+    "a",
+    "an",
+    "the",
+    "to",
+    "for",
+    "with",
+    "by",
+    "on",
+    "in",
+    "of",
+    "and",
+    "or",
+    "from",
+    "into",
+    "about",
+    "me",
+    "my",
+    "mine",
+    "you",
+    "your",
+    "yours",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "now",
+    "that",
+    "this",
+    "these",
+    "those",
+    "who",
+    "whom",
+    "what",
+    "when",
+    "where",
+    "why",
+    "how",
+    "does",
+    "do",
+    "did",
+    "is",
+    "are",
+    "was",
+    "were",
+    "am",
+    "can",
+    "will",
+    "would",
+    "should",
+    "could",
+    "tell",
+    "show",
+    "give",
+    "anything",
+    "everything",
+    "asked",
+    "ask",
+    "asking",
+    "request",
+    "requested",
+    "requesting",
+    "send",
+    "sending",
+    "share",
+    "sharing",
+    "provide",
+    "providing",
+    "deliver",
+    "delivering",
+    "review",
+    "reviewing",
+    "report",
+    "reports",
+    "reporting",
+    "current",
+    "currently",
+}
 
 DOCUMENT_EXTRACTION_SCHEMA = {
     "type": "object",
@@ -85,43 +264,40 @@ DOCUMENT_EXTRACTION_PROMPT = ChatPromptTemplate.from_template(
 CHAT_PROMPT = ChatPromptTemplate.from_template(
     """
     You are SAGE, an enterprise Graph-RAG assistant.
-    SAGE proves answers instead of giving conversational fluff.
-    Your tone is precise, calm, professional, and evidence-driven.
-    Do not sound casual, overly enthusiastic, or vague.
+    Return JSON only with this exact shape:
+    {{
+      "summary": "string",
+      "bullets": ["string"]
+    }}
 
-    Answering style:
-    - Lead with the direct answer first
-    - Then show the supporting evidence in a structured way
-    - Use short sections such as `Answer`, `Findings`, and `Evidence and Provenance` when useful
-    - If the user asks for a list, violations, approvals, delays, responsibility, policy checks, or audit-style output, prefer a numbered findings format
-    - Mention names, dates, document IDs, senders, timestamps, relationships, and policy references explicitly when they are present in the context
-    - Do not replace a known person with vague phrases like "someone" or "a person"
-    - If evidence is incomplete, weak, or missing, say that clearly instead of overstating confidence
-    - Separate confirmed facts from inference
-    - Do not invent graph paths, document IDs, policy IDs, timestamps, Cypher queries, approvals, or reasoning steps that are not supported by the provided context
+    Visible answer contract:
+    - `summary` is always required, non-empty, and contains only user-facing chat text
+    - `bullets` contains only extra user-facing detail points; use an empty array if no extra detail is needed
+    - Do not emit markdown headings like `Answer:` or `Evidence and Provenance:`
+    - Do not emit JSON code fences, metadata labels, raw trace fields, document IDs, fact IDs, or reasoning notes
+    - Do not mention the answer mode, explanation policy, or why the answer is short or long
+    - Do not invent graph paths, document IDs, policy IDs, timestamps, approvals, or reasoning steps that are not supported by the provided context
+    - Treat canonical facts as higher-trust evidence than chunk summaries when both are present
+    - If evidence is incomplete or weak, say that clearly in the visible answer instead of overstating confidence
 
-    Preferred response shape:
-    - For direct managerial questions, start with `Answer:` followed by 1 concise paragraph
-    - Then add `Evidence and Provenance:` with flat bullet points summarizing the strongest support
-    - For audit/compliance or multi-result queries, start with `Findings:` and enumerate the results
-    - After the findings, add `Evidence and Provenance:` with the supporting references
-    - If a requested provenance item is not available from the retrieved context, say `Not available in retrieved evidence`
-
-    Writing standard:
-    - Be concise, but make the reasoning traceable
-    - Prefer operational clarity over conversational warmth
-    - Sound like a system built for managers, auditors, and enterprise review
-    - Avoid filler language, hedging that adds no value, or generic assistant phrases
+    Answer mode:
+    - Requested answer mode: {answer_mode}
+    - If mode is `short`, keep the answer compact and only add bullets if they materially help
+    - If mode is `long`, keep one clear summary and add concise bullets when extra detail helps
+    - Long mode means more detail, not less structure
 
     Here is the user's question: {query}
 
     Identity context:
     {user_context}
 
+    Retrieval guidance:
+    {retrieval_guidance}
+
     Here is the relevant context from the documents (keep in mind you get limited context and that's what you should work with):
     {context}
 
-    Respond to the user's question in that enterprise, evidence-driven style using only the context provided:
+    Respond to the user's question using only the provided context and return JSON only:
     """
 )
 
@@ -141,7 +317,12 @@ def _extract_context_parts(documents: List[str]) -> List[str]:
     context_parts: List[str] = []
     for item in documents:
         try:
-            context_parts.append(item.split("Chunk Summary: ")[1].split(", Document: ")[0])
+            if "Chunk Summary: " in item:
+                context_parts.append(item.split("Chunk Summary: ", 1)[1].split(", Document ID: ", 1)[0])
+            elif "Fact Summary: " in item:
+                context_parts.append(item.split("Fact Summary: ", 1)[1].split(", Fact ID: ", 1)[0])
+            else:
+                context_parts.append(str(item))
         except (IndexError, AttributeError):
             context_parts.append(str(item))
     return context_parts
@@ -151,8 +332,28 @@ def _contains_first_person(text: str) -> bool:
     return bool(FIRST_PERSON_PATTERN.search(text))
 
 
+def _normalize_query_text(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def _contains_phrase(text: str, phrases: tuple[str, ...]) -> bool:
+    normalized = _normalize_query_text(text)
+    return any(phrase in normalized for phrase in phrases)
+
+
+def _looks_like_task_lookup(text: str) -> bool:
+    lowered = text.lower()
+    if not TASK_LOOKUP_PATTERN.search(text):
+        return False
+    if any(token in lowered for token in ("promise", "promised", "supposed to", "assigned", "assignment", "working on", "responsible for", "deadline", "due", "by when")):
+        return True
+    return _contains_first_person(text) and any(token in lowered for token in ("what", "which", "when", "am i", "did i", "do i", "have i"))
+
+
 def _classify_query(text: str) -> str:
     lowered = text.lower()
+    if _looks_like_task_lookup(text):
+        return "task_commitment_lookup"
     if _contains_first_person(text):
         return "personal_context"
     if any(token in lowered for token in ("weekend", "today", "tomorrow", "schedule", "meeting", "plan")):
@@ -162,6 +363,143 @@ def _classify_query(text: str) -> str:
     if any(token in lowered for token in ("who", "whose", "person", "people")):
         return "person_lookup"
     return "general_search"
+
+
+def _looks_like_broad_or_explanatory_request(text: str, query_type: Optional[str]) -> bool:
+    if query_type == "explanation":
+        return True
+    normalized = _normalize_query_text(text)
+    if _contains_phrase(normalized, LONG_OVERRIDE_PHRASES):
+        return True
+    return _contains_phrase(normalized, BROAD_SCOPE_PHRASES)
+
+
+def _looks_like_direct_lookup_request(text: str, query_type: Optional[str]) -> bool:
+    if query_type in FACT_PRIORITY_QUERY_TYPES:
+        return True
+    if query_type in {"schedule_or_timeline", "person_lookup"} and DIRECT_LOOKUP_PREFIX.search(text):
+        return True
+    if DIRECT_LOOKUP_PREFIX.search(text) and not _looks_like_broad_or_explanatory_request(text, query_type):
+        return True
+    return False
+
+
+def _select_answer_mode(query: str, retrieval_trace: Optional[Dict[str, Any]] = None) -> tuple[str, str]:
+    query_type = (retrieval_trace or {}).get("query_type")
+    result_count = int((retrieval_trace or {}).get("result_count") or 0)
+    max_hop_count = int((retrieval_trace or {}).get("max_hop_count") or 0)
+
+    # TODO(agentic): Future planner/critic flows can replace this selector, but they must keep the
+    # stable answer payload contract and return the same mode/reason_code semantics to the UI.
+    if _contains_phrase(query, SHORT_OVERRIDE_PHRASES):
+        return ANSWER_MODE_SHORT, REASON_CODE_EXPLICIT_SHORT
+    if _contains_phrase(query, LONG_OVERRIDE_PHRASES):
+        return ANSWER_MODE_LONG, REASON_CODE_EXPLICIT_LONG
+    if _looks_like_broad_or_explanatory_request(query, query_type):
+        return ANSWER_MODE_LONG, REASON_CODE_BROAD_OR_EXPLANATORY
+    if _looks_like_direct_lookup_request(query, query_type):
+        return ANSWER_MODE_SHORT, REASON_CODE_DIRECT_LOOKUP
+    if result_count > 2 or max_hop_count > 1:
+        return ANSWER_MODE_LONG, REASON_CODE_EVIDENCE_COMPLEXITY
+    return ANSWER_MODE_SHORT, REASON_CODE_DIRECT_LOOKUP
+
+
+def _build_answer_explanation(mode: str, reason_code: str) -> str:
+    if reason_code == REASON_CODE_EXPLICIT_SHORT:
+        return "SAGE kept this answer short because your question explicitly asked for brevity."
+    if reason_code == REASON_CODE_EXPLICIT_LONG:
+        return "SAGE expanded this answer because your question explicitly asked for more detail."
+    if reason_code == REASON_CODE_BROAD_OR_EXPLANATORY:
+        return "SAGE used a longer answer because this question asks for explanation, summary, comparison, or broad coverage."
+    if reason_code == REASON_CODE_EVIDENCE_COMPLEXITY:
+        return "SAGE used a longer answer because the retrieved evidence spans multiple items or hops."
+    if reason_code == REASON_CODE_FALLBACK_INVALID_JSON:
+        return "SAGE returned a safe short answer because the detailed response could not be formatted reliably."
+    if mode == ANSWER_MODE_SHORT:
+        return "SAGE kept this answer short because the question looks like a narrow lookup with a direct answer."
+    return "SAGE used a longer answer because extra detail helps explain the available evidence."
+
+
+def _derive_evidence_refs(retrieval_trace: Optional[Dict[str, Any]] = None, limit: int = 3) -> List[str]:
+    refs: List[str] = []
+    for item in (retrieval_trace or {}).get("evidence") or []:
+        ref = None
+        if item.get("fact_id"):
+            ref = f"fact:{item['fact_id']}"
+        elif item.get("chunk_id"):
+            ref = f"chunk:{item['chunk_id']}"
+        if ref and ref not in refs:
+            refs.append(ref)
+        if len(refs) >= limit:
+            break
+    return refs
+
+
+def _normalize_summary_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).split()).strip()
+
+
+def _normalize_bullets(values: Any) -> List[str]:
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list):
+        return []
+
+    bullets = [_normalize_summary_text(value) for value in values]
+    return [value for value in bullets if value]
+
+
+def _build_fallback_summary(query: str, documents: List[str], retrieval_trace: Optional[Dict[str, Any]] = None) -> str:
+    if not documents or not (retrieval_trace or {}).get("evidence"):
+        return (
+            "I couldn't find enough reliable information in the available evidence to answer that confidently."
+        )
+    if _looks_like_broad_or_explanatory_request(query, (retrieval_trace or {}).get("query_type")):
+        return "I found relevant evidence, but I could not format a detailed answer reliably. Please use the evidence panel for more detail."
+    return "I found relevant evidence, but I could not format the final answer reliably."
+
+
+def _build_answer_payload(
+    *,
+    mode: str,
+    reason_code: str,
+    summary: str,
+    bullets: List[str],
+    retrieval_trace: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    normalized_summary = _normalize_summary_text(summary)
+    if not normalized_summary:
+        normalized_summary = "I couldn't produce a readable answer from the available evidence."
+
+    # TODO(agentic): Future planner/generator pipelines can replace this payload producer, but they
+    # must keep answer_payload stable so the UI remains decoupled from backend execution changes.
+    return {
+        "schema_version": ANSWER_PAYLOAD_SCHEMA_VERSION,
+        "mode": mode,
+        "reason_code": reason_code,
+        "summary": normalized_summary,
+        "bullets": _normalize_bullets(bullets),
+        "explanation": _build_answer_explanation(mode, reason_code),
+        "evidence_refs": _derive_evidence_refs(retrieval_trace=retrieval_trace),
+    }
+
+
+def _parse_answer_response(raw_response: str, *, mode: str) -> Dict[str, Any]:
+    payload = json.loads(raw_response)
+    if not isinstance(payload, dict):
+        raise ValueError("Structured answer response must be a JSON object")
+
+    summary = _normalize_summary_text(payload.get("summary"))
+    if not summary:
+        raise ValueError("Structured answer response must include a non-empty summary")
+
+    return {
+        "summary": summary,
+        "bullets": _normalize_bullets(payload.get("bullets")),
+        "thinking": payload.get("thinking") if isinstance(payload.get("thinking"), list) else [],
+    }
 
 
 def _serialize_neo4j_entity(value: Any) -> Dict[str, Any]:
@@ -216,16 +554,244 @@ def _build_path_summary(user_scoped: bool, related_label: Optional[str]) -> Dict
     }
 
 
+def _build_fact_path_summary(user_scoped: bool) -> Dict[str, Any]:
+    nodes = ["Person", "CanonicalFact", "Document"] if user_scoped else ["CanonicalFact", "Document"]
+    return {
+        "nodes": nodes,
+        "path": " -> ".join(nodes),
+        "hop_count": max(len(nodes) - 1, 0),
+    }
+
+
+def _result_rank_value(item: Dict[str, Any]) -> float:
+    return float(item.get("rank_score", item.get("similarity", 0)) or 0)
+
+
+def _extract_query_focus_terms(query: str) -> List[str]:
+    focus_terms: List[str] = []
+    seen: set[str] = set()
+
+    for match in QUERY_EMAIL_PATTERN.finditer(query or ""):
+        term = match.group(0).strip().lower()
+        if term and term not in seen:
+            focus_terms.append(term)
+            seen.add(term)
+
+    for match in QUERY_NAME_PATTERN.finditer(query or ""):
+        raw = match.group(0).strip()
+        if not raw:
+            continue
+        term = raw.lower()
+        if term in QUERY_FOCUS_STOPWORDS:
+            continue
+        if len(raw.split()) == 1 and raw.lower() in QUERY_FOCUS_STOPWORDS:
+            continue
+        if term not in seen:
+            focus_terms.append(term)
+            seen.add(term)
+
+    for match in QUERY_TOKEN_PATTERN.finditer(query or ""):
+        term = match.group(0).strip().lower()
+        if len(term) < 3 or term in QUERY_FOCUS_STOPWORDS:
+            continue
+        if term not in seen:
+            focus_terms.append(term)
+            seen.add(term)
+
+    return focus_terms
+
+
+def _is_reports_to_lookup(query: str) -> bool:
+    normalized = (query or "").lower()
+    return "report to" in normalized or "reports to" in normalized
+
+
+def _collect_row_search_text(row: Dict[str, Any]) -> str:
+    fields: List[str] = []
+    for value in (
+        row.get("chunk_summary"),
+        row.get("fact_summary"),
+        _serialize_neo4j_entity(row.get("d")).get("subject"),
+        _serialize_neo4j_entity(row.get("d")).get("sender"),
+        _serialize_neo4j_entity(row.get("d")).get("doc_id"),
+        _get_display_name(_serialize_neo4j_entity(row.get("n"))) if row.get("n") else None,
+        _serialize_neo4j_entity(row.get("n")).get("id") if row.get("n") else None,
+        _serialize_neo4j_entity(row.get("f")).get("canonical_key") if row.get("f") else None,
+        _serialize_neo4j_entity(row.get("f")).get("subject_key") if row.get("f") else None,
+        _serialize_neo4j_entity(row.get("f")).get("subject_entity_id") if row.get("f") else None,
+        _serialize_neo4j_entity(row.get("f")).get("object_key") if row.get("f") else None,
+        _serialize_neo4j_entity(row.get("f")).get("object_entity_id") if row.get("f") else None,
+        _serialize_neo4j_entity(row.get("f")).get("claim_type") if row.get("f") else None,
+    ):
+        if value:
+            fields.append(str(value))
+    return " ".join(fields).lower()
+
+
+def _focus_match_score(row: Dict[str, Any], focus_terms: List[str]) -> int:
+    if not focus_terms:
+        return 0
+    haystack = _collect_row_search_text(row)
+    return sum(1 for term in focus_terms if term in haystack)
+
+
 def _merge_ranked_results(primary: List[Dict[str, Any]], secondary: List[Dict[str, Any]], limit: int = 5) -> List[Dict[str, Any]]:
-    by_chunk: Dict[str, Dict[str, Any]] = {}
+    by_identifier: Dict[str, Dict[str, Any]] = {}
     for row in primary + secondary:
-        chunk_id = str(row.get("chunk_id", ""))
-        existing = by_chunk.get(chunk_id)
-        if existing is None or row.get("similarity", 0) > existing.get("similarity", 0):
-            by_chunk[chunk_id] = row
-    merged = list(by_chunk.values())
-    merged.sort(key=lambda item: item.get("similarity", 0), reverse=True)
+        identifier = str(
+            row.get("fact_id")
+            or row.get("chunk_id")
+            or row.get("canonical_key")
+            or row.get("fact_summary")
+            or ""
+        )
+        existing = by_identifier.get(identifier)
+        if existing is None or _result_rank_value(row) > _result_rank_value(existing):
+            by_identifier[identifier] = row
+    merged = list(by_identifier.values())
+    merged.sort(key=_result_rank_value, reverse=True)
     return merged[:limit]
+
+
+def _identity_matches(candidate: Optional[str], user_id: Optional[str]) -> bool:
+    return bool(candidate and user_id and str(candidate).strip().lower() == str(user_id).strip().lower())
+
+
+def _prepare_chunk_result(
+    row: Dict[str, Any],
+    *,
+    focus_terms: Optional[List[str]] = None,
+    reports_to_lookup: bool = False,
+) -> Dict[str, Any]:
+    ranked = dict(row)
+    focus_score = _focus_match_score(row, list(focus_terms or []))
+    rank_score = float(row.get("similarity", 0) or 0)
+    if focus_score:
+        rank_score += 0.35 * focus_score
+    if reports_to_lookup and "reports to" in str(row.get("chunk_summary") or "").lower():
+        rank_score += 0.3
+    ranked["focus_match_score"] = focus_score
+    ranked["rank_score"] = rank_score
+    return ranked
+
+
+def _prepare_fact_result(
+    row: Dict[str, Any],
+    *,
+    query_type: str,
+    user_id: Optional[str],
+    personalized_lookup: bool,
+    exact_match: bool = False,
+    focus_terms: Optional[List[str]] = None,
+    reports_to_lookup: bool = False,
+) -> Dict[str, Any]:
+    ranked = dict(row)
+    fact = _serialize_neo4j_entity(row.get("f"))
+    similarity = float(row.get("similarity", 0) or 0)
+    rank_score = similarity
+    focus_score = _focus_match_score(row, list(focus_terms or []))
+
+    if fact.get("status") == "current":
+        rank_score += 0.05
+    if exact_match:
+        rank_score += 0.75
+    if query_type in FACT_PRIORITY_QUERY_TYPES and fact.get("claim_type") in TASK_LIKE_FACT_TYPES:
+        rank_score += 0.35
+    if personalized_lookup:
+        subject_candidate = fact.get("subject_entity_id") or fact.get("subject_key")
+        object_candidate = fact.get("object_entity_id") or fact.get("object_key")
+        if _identity_matches(subject_candidate, user_id):
+            rank_score += 0.25
+        elif _identity_matches(object_candidate, user_id):
+            rank_score += 0.1
+    if focus_score:
+        rank_score += 0.35 * focus_score
+    if reports_to_lookup and fact.get("claim_type") == "REPORTS_TO":
+        rank_score += 0.4
+
+    ranked["focus_match_score"] = focus_score
+    ranked["rank_score"] = rank_score
+    return ranked
+
+
+def _combine_ranked_results(
+    vector_results: List[Dict[str, Any]],
+    fact_results: List[Dict[str, Any]],
+    *,
+    query_type: str,
+    focus_terms: Optional[List[str]] = None,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    if query_type in FACT_PRIORITY_QUERY_TYPES and fact_results:
+        combined = fact_results[:limit]
+        remaining = max(limit - len(combined), 0)
+        if remaining:
+            combined.extend(vector_results[:remaining])
+        return combined[:limit]
+
+    combined = vector_results + fact_results
+    if query_type == "person_lookup" and focus_terms:
+        focused = [item for item in combined if int(item.get("focus_match_score") or 0) > 0]
+        if focused:
+            combined = focused
+    combined.sort(key=_result_rank_value, reverse=True)
+    return combined[:limit]
+
+
+def _build_response_context(documents: List[str], retrieval_trace: Optional[Dict[str, Any]] = None) -> str:
+    evidence = list((retrieval_trace or {}).get("evidence") or [])
+    if not evidence:
+        return "\n\n".join(_extract_context_parts(documents))
+
+    fact_lines: List[str] = []
+    chunk_lines: List[str] = []
+    other_lines: List[str] = []
+
+    for item in evidence:
+        if item.get("fact_id"):
+            fact = item.get("fact") or {}
+            document = item.get("document") or {}
+            fact_lines.append(
+                "- "
+                f"Summary: {item.get('fact_summary') or 'No fact summary'} | "
+                f"Type: {fact.get('claim_type') or 'unknown'} | "
+                f"Status: {fact.get('status') or 'unknown'} | "
+                f"Conversation Type: {document.get('conversation_type') or 'unknown'} | "
+                f"Subject: {fact.get('subject_entity_id') or fact.get('subject_key') or 'unknown'} | "
+                f"Object: {fact.get('object_entity_id') or fact.get('object_key') or 'unknown'} | "
+                f"Time: {fact.get('temporal_start') or 'not specified'} ({fact.get('temporal_granularity') or 'unresolved'}) | "
+                f"Canonical Key: {fact.get('canonical_key') or item.get('related_node', {}).get('display_name') or 'unknown'} | "
+                f"Supporting Document ID: {document.get('doc_id') or 'unknown'} | "
+                f"Similarity: {item.get('similarity', 0)}"
+            )
+            continue
+
+        if item.get("chunk_id"):
+            document = item.get("document") or {}
+            related_node = item.get("related_node") or {}
+            chunk_lines.append(
+                "- "
+                f"Summary: {item.get('chunk_summary') or 'No summary'} | "
+                f"Document ID: {document.get('doc_id') or 'unknown'} | "
+                f"Conversation Type: {document.get('conversation_type') or 'unknown'} | "
+                f"Subject: {document.get('subject') or 'No Subject'} | "
+                f"Sender: {document.get('sender') or 'Unknown'} | "
+                f"Relationship: {item.get('relationship') or 'RELATED_TO'} | "
+                f"Related Node: {related_node.get('display_name') or 'Unknown'} | "
+                f"Similarity: {item.get('similarity', 0)}"
+            )
+            continue
+
+        other_lines.append(str(item))
+
+    sections: List[str] = []
+    if fact_lines:
+        sections.append("Canonical facts (highest-trust graph evidence):\n" + "\n".join(fact_lines))
+    if chunk_lines:
+        sections.append("Supporting document and chunk evidence:\n" + "\n".join(chunk_lines))
+    if other_lines:
+        sections.append("Additional evidence:\n" + "\n".join(f"- {line}" for line in other_lines))
+    return "\n\n".join(sections) if sections else "\n\n".join(_extract_context_parts(documents))
 
 
 def extract_structured_data(document_text: str, doc_id: str) -> Dict[str, Any]:
@@ -255,6 +821,8 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
     driver = None
     personalized_lookup = bool(user_id and _contains_first_person(user_input))
     query_type = _classify_query(user_input)
+    focus_terms = _extract_query_focus_terms(user_input)
+    reports_to_lookup = _is_reports_to_lookup(user_input)
 
     try:
         driver = utils.create_neo4j_driver()
@@ -263,24 +831,167 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
         query_embedding = np.array(model.encode(query_text), dtype=np.float32)
 
         with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
-            global_results = session.run(
+            global_results = [
+                _prepare_chunk_result(row, focus_terms=focus_terms, reports_to_lookup=reports_to_lookup)
+                for row in session.run(
                 GRAPH_VECTOR_QUERY,
                 query_embedding=query_embedding.tolist(),
-            ).data()
+                ).data()
+                if row.get("chunk_id") or row.get("chunk_summary")
+            ]
             person_results: List[Dict[str, Any]] = []
             if personalized_lookup:
-                person_results = session.run(
-                    PERSON_GRAPH_VECTOR_QUERY,
-                    user_id=user_id,
-                    query_embedding=query_embedding.tolist(),
+                person_results = [
+                    _prepare_chunk_result(row, focus_terms=focus_terms, reports_to_lookup=reports_to_lookup)
+                    for row in session.run(
+                        PERSON_GRAPH_VECTOR_QUERY,
+                        user_id=user_id,
+                        query_embedding=query_embedding.tolist(),
+                    ).data()
+                    if row.get("chunk_id") or row.get("chunk_summary")
+                ]
+            global_fact_results = [
+                _prepare_fact_result(
+                        row,
+                        query_type=query_type,
+                        user_id=user_id,
+                        personalized_lookup=personalized_lookup,
+                        focus_terms=focus_terms,
+                        reports_to_lookup=reports_to_lookup,
+                    )
+                    for row in session.run(
+                        FACT_VECTOR_QUERY,
+                        query_embedding=query_embedding.tolist(),
                 ).data()
+                if row.get("fact_id")
+            ]
+            person_fact_results: List[Dict[str, Any]] = []
+            if personalized_lookup:
+                person_fact_results = [
+                    _prepare_fact_result(
+                        row,
+                        query_type=query_type,
+                        user_id=user_id,
+                        personalized_lookup=personalized_lookup,
+                        focus_terms=focus_terms,
+                        reports_to_lookup=reports_to_lookup,
+                    )
+                    for row in session.run(
+                        PERSON_FACT_VECTOR_QUERY,
+                        user_id=user_id,
+                        query_embedding=query_embedding.tolist(),
+                    ).data()
+                    if row.get("fact_id")
+                ]
+            exact_task_fact_results: List[Dict[str, Any]] = []
+            if personalized_lookup and query_type in FACT_PRIORITY_QUERY_TYPES:
+                exact_task_fact_results = [
+                    _prepare_fact_result(
+                        row,
+                        query_type=query_type,
+                        user_id=user_id,
+                        personalized_lookup=personalized_lookup,
+                        exact_match=True,
+                        focus_terms=focus_terms,
+                        reports_to_lookup=reports_to_lookup,
+                    )
+                    for row in session.run(
+                        PERSON_TASK_FACT_QUERY,
+                        user_id=user_id,
+                        claim_types=sorted(TASK_LIKE_FACT_TYPES),
+                    ).data()
+                    if row.get("fact_id")
+                ]
 
         vector_results = _merge_ranked_results(person_results, global_results, limit=5)
+        fact_results = _merge_ranked_results(exact_task_fact_results + person_fact_results, global_fact_results, limit=5)
+        combined_results = _combine_ranked_results(
+            vector_results,
+            fact_results,
+            query_type=query_type,
+            focus_terms=focus_terms,
+            limit=5,
+        )
         evidence: List[Dict[str, Any]] = []
         documents: List[str] = []
         matched_entities: List[str] = []
 
-        for item in vector_results:
+        for item in combined_results:
+            if item.get("fact_id"):
+                supporting_document = _serialize_neo4j_entity(item.get("d"))
+                fact = _serialize_neo4j_entity(item.get("f"))
+                path_summary = _build_fact_path_summary(personalized_lookup)
+                fact_summary = item.get("fact_summary") or fact.get("summary") or "No fact summary"
+                fact_id = item.get("fact_id") or fact.get("fact_id")
+                canonical_key = fact.get("canonical_key")
+                similarity = round(float(item.get("similarity", 0) or 0), 4)
+                rank_score = round(_result_rank_value(item), 4)
+
+                for candidate in (
+                    fact.get("subject_key"),
+                    fact.get("subject_entity_id"),
+                    fact.get("object_key"),
+                    fact.get("object_entity_id"),
+                    supporting_document.get("subject"),
+                    supporting_document.get("sender"),
+                ):
+                    if candidate and candidate not in matched_entities:
+                        matched_entities.append(str(candidate))
+
+                evidence_item = {
+                    "fact_id": fact_id,
+                    "fact_summary": fact_summary,
+                    "similarity": similarity,
+                    "rank_score": rank_score,
+                    "relationship": "CANONICAL_FACT",
+                    "retrieval_path": path_summary["path"],
+                    "hop_count": path_summary["hop_count"],
+                    "document": {
+                        "doc_id": supporting_document.get("doc_id"),
+                        "subject": supporting_document.get("subject"),
+                        "sender": supporting_document.get("sender"),
+                        "timestamp": supporting_document.get("timestamp"),
+                        "source": supporting_document.get("source"),
+                        "conversation_type": supporting_document.get("conversation_type"),
+                        "conversation_id": supporting_document.get("conversation_id"),
+                        "group_id": supporting_document.get("group_id"),
+                    },
+                    "related_node": {
+                        "label": "CanonicalFact",
+                        "display_name": canonical_key or fact_summary,
+                        "id": fact_id,
+                    },
+                    "fact": {
+                        "claim_type": fact.get("claim_type"),
+                        "status": fact.get("status"),
+                        "canonical_key": canonical_key,
+                        "subject_key": fact.get("subject_key"),
+                        "subject_entity_id": fact.get("subject_entity_id"),
+                        "object_key": fact.get("object_key"),
+                        "object_entity_id": fact.get("object_entity_id"),
+                        "temporal_start": fact.get("temporal_start"),
+                        "temporal_end": fact.get("temporal_end"),
+                        "temporal_granularity": fact.get("temporal_granularity"),
+                        "support_count": fact.get("support_count"),
+                        "confidence": fact.get("confidence"),
+                    },
+                }
+                evidence.append(evidence_item)
+                documents.append(
+                    "Fact Summary: "
+                    f"{fact_summary}, "
+                    f"Fact ID: {fact_id or 'unknown'}, "
+                    f"Canonical Key: {canonical_key or 'unknown'}, "
+                    f"Fact Type: {fact.get('claim_type') or 'unknown'}, "
+                    f"Conversation Type: {supporting_document.get('conversation_type') or 'unknown'}, "
+                    f"Subject: {fact.get('subject_entity_id') or fact.get('subject_key') or 'unknown'}, "
+                    f"Object: {fact.get('object_entity_id') or fact.get('object_key') or 'unknown'}, "
+                    f"Time: {fact.get('temporal_start') or 'not specified'}, "
+                    f"Supporting Document ID: {supporting_document.get('doc_id') or 'unknown'}, "
+                    f"Similarity: {similarity}"
+                )
+                continue
+
             document = _serialize_neo4j_entity(item.get("d"))
             related_node = _serialize_neo4j_entity(item.get("n"))
             related_label = _get_primary_label(related_node) if related_node else None
@@ -291,6 +1002,7 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
             subject = document.get("subject")
             doc_id = document.get("doc_id")
             similarity = round(float(item.get("similarity", 0) or 0), 4)
+            rank_score = round(_result_rank_value(item), 4)
             relationship = item.get("relationship") or "RELATED_TO"
 
             for candidate in (sender, subject, related_name):
@@ -301,6 +1013,7 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                 "chunk_id": item.get("chunk_id"),
                 "chunk_summary": item.get("chunk_summary", "No summary"),
                 "similarity": similarity,
+                "rank_score": rank_score,
                 "relationship": relationship,
                 "retrieval_path": path_summary["path"],
                 "hop_count": path_summary["hop_count"],
@@ -310,6 +1023,9 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                     "sender": sender,
                     "timestamp": document.get("timestamp"),
                     "source": document.get("source"),
+                    "conversation_type": document.get("conversation_type"),
+                    "conversation_id": document.get("conversation_id"),
+                    "group_id": document.get("group_id"),
                 },
                 "related_node": {
                     "label": related_label,
@@ -323,6 +1039,7 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                 "Chunk Summary: "
                 f"{evidence_item['chunk_summary']}, "
                 f"Document ID: {doc_id or 'unknown'}, "
+                f"Conversation Type: {document.get('conversation_type') or 'unknown'}, "
                 f"Subject: {subject or 'No Subject'}, "
                 f"Sender: {sender or 'Unknown'}, "
                 f"Similarity: {similarity}, "
@@ -375,37 +1092,112 @@ def query_graph(user_input: str, user_id: Optional[str] = None) -> List[str]:
     return query_graph_with_trace(user_input, user_id=user_id)["documents"]
 
 
-def generate_groq_response(query: str, documents: List[str], user_id: Optional[str] = None) -> Dict[str, List[str] | str]:
+def generate_groq_response(
+    query: str,
+    documents: List[str],
+    user_id: Optional[str] = None,
+    retrieval_trace: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    mode, reason_code = _select_answer_mode(query, retrieval_trace=retrieval_trace)
     if not documents:
+        answer_payload = _build_answer_payload(
+            mode=mode,
+            reason_code=reason_code,
+            summary=(
+                "I've searched through my knowledge base, but I don't have any specific information about that topic yet. "
+                "Would you like to ask about something else or perhaps upload a document with this information?"
+            ),
+            bullets=[],
+            retrieval_trace=retrieval_trace,
+        )
         return {
-            "answer": "I've searched through my knowledge base, but I don't have any specific information about that topic yet. Would you like to ask about something else or perhaps upload a document with this information?",
+            "answer": answer_payload["summary"],
+            "answer_payload": answer_payload,
             "thinking": [],
         }
 
     try:
-        context = "\n\n".join(_extract_context_parts(documents))
+        context = _build_response_context(documents, retrieval_trace=retrieval_trace)
         user_context = "No authenticated user context was provided."
         if user_id:
             user_context = f"Authenticated user id: {user_id}."
             if _contains_first_person(query):
                 user_context += " Treat first-person references (I/me/my) as this user unless the query says otherwise."
-        llm = _create_groq_client(temperature=0.3)
-        chain = CHAT_PROMPT | llm | StrOutputParser()
-        response = chain.invoke({"query": query, "context": context, "user_context": user_context})
-
-        think_parts = re.findall(r"<think>(.*?)</think>", response, re.DOTALL)
-        answer = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
-        if not answer:
-            answer = (
-                "I'm sorry, but I couldn't find a specific answer to your question in the documents I have access to. "
-                "Could you try rephrasing your question or asking about something else? I'm here to help!"
+        retrieval_guidance = "Use only the retrieved evidence. If evidence is weak or missing, say so clearly."
+        query_type = (retrieval_trace or {}).get("query_type")
+        if query_type:
+            user_context += f" Query classification: {query_type}."
+        if query_type in FACT_PRIORITY_QUERY_TYPES:
+            retrieval_guidance = (
+                "This is a task or commitment lookup. Prioritize current CanonicalFact evidence over chunk summaries. "
+                "Use chunk evidence only to support provenance, add timestamps, or clarify ambiguity."
             )
+        elif (retrieval_trace or {}).get("evidence"):
+            retrieval_guidance = (
+                "Canonical facts are the highest-trust evidence layer. If a canonical fact conflicts with a chunk summary, trust the canonical fact and mention the discrepancy."
+            )
+        if any(
+            (item.get("document") or {}).get("conversation_type") == "group"
+            for item in ((retrieval_trace or {}).get("evidence") or [])
+        ):
+            retrieval_guidance += (
+                " If a request or instruction comes from a group conversation without a resolved target person, "
+                "say that the target is ambiguous instead of assigning it to one person."
+            )
+        llm = _create_groq_client(temperature=0.3, require_json=True)
+        chain = CHAT_PROMPT | llm | StrOutputParser()
+        response = chain.invoke(
+            {
+                "query": query,
+                "context": context,
+                "user_context": user_context,
+                "retrieval_guidance": retrieval_guidance,
+                "answer_mode": mode,
+            }
+        )
+        parsed = _parse_answer_response(response, mode=mode)
+        answer_payload = _build_answer_payload(
+            mode=mode,
+            reason_code=reason_code,
+            summary=parsed["summary"],
+            bullets=parsed["bullets"],
+            retrieval_trace=retrieval_trace,
+        )
 
-        return {"answer": answer, "thinking": think_parts if think_parts else []}
+        return {
+            "answer": answer_payload["summary"],
+            "answer_payload": answer_payload,
+            "thinking": [str(item) for item in parsed.get("thinking") or [] if str(item).strip()],
+        }
+    except (ValueError, json.JSONDecodeError) as exc:
+        logger.warning("Structured answer parsing failed: %s", exc)
+        answer_payload = _build_answer_payload(
+            mode=ANSWER_MODE_SHORT,
+            reason_code=REASON_CODE_FALLBACK_INVALID_JSON,
+            summary=_build_fallback_summary(query, documents, retrieval_trace=retrieval_trace),
+            bullets=[],
+            retrieval_trace=retrieval_trace,
+        )
+        return {
+            "answer": answer_payload["summary"],
+            "answer_payload": answer_payload,
+            "thinking": [],
+        }
     except Exception as exc:
         logger.error(f"Groq API error: {exc}")
+        answer_payload = _build_answer_payload(
+            mode=ANSWER_MODE_SHORT,
+            reason_code=REASON_CODE_FALLBACK_INVALID_JSON,
+            summary=(
+                "I'm sorry, but I seem to be having trouble processing that request right now. "
+                "Please try again in a moment."
+            ),
+            bullets=[],
+            retrieval_trace=retrieval_trace,
+        )
         return {
-            "answer": "I'm sorry, but I seem to be having a bit of trouble processing your question right now. Could we try again in a moment? If the issue persists, you might want to try rephrasing your question. I'm eager to help once we get past this hiccup!",
+            "answer": answer_payload["summary"],
+            "answer_payload": answer_payload,
             "thinking": [f"Error: {exc}"],
         }
 
@@ -497,8 +1289,13 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
                     d.attachment_name = $attachment_name,
                     d.attachment_type = $attachment_type,
                     d.attachment_url = $attachment_url,
+                    d.origin_message_id = $origin_message_id,
+                    d.linked_message_id = $linked_message_id,
                     d.trace_json = $trace_json,
-                    d.graph_sync_status = $graph_sync_status
+                    d.graph_sync_status = $graph_sync_status,
+                    d.saia_status = coalesce(d.saia_status, null),
+                    d.saia_processed_at = coalesce(d.saia_processed_at, null),
+                    d.saia_error = coalesce(d.saia_error, null)
                 """,
                 doc_id=data["doc_id"],
                 sender=data["sender"],
@@ -514,6 +1311,8 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
                 attachment_name=data.get("attachment_name"),
                 attachment_type=data.get("attachment_type"),
                 attachment_url=data.get("attachment_url"),
+                origin_message_id=data.get("origin_message_id"),
+                linked_message_id=data.get("linked_message_id"),
                 trace_json=data.get("trace_json"),
                 graph_sync_status=data.get("graph_sync_status"),
             )
@@ -573,6 +1372,16 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
                     MERGE (d)-[:RECEIVED_BY]->(r)
                     """,
                     receiver_id=receiver,
+                    doc_id=data["doc_id"],
+                )
+            if data.get("origin_message_id"):
+                session.run(
+                    """
+                    MATCH (m:Message {id: $message_id})
+                    MATCH (d:Document {doc_id: $doc_id})
+                    MERGE (m)-[:HAS_EVIDENCE_DOCUMENT]->(d)
+                    """,
+                    message_id=data["origin_message_id"],
                     doc_id=data["doc_id"],
                 )
         return True

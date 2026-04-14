@@ -1,0 +1,84 @@
+Best next test sequence
+Use a direct chat with one person first.
+
+Send:
+I'll send you the Project Alpha budget by 6pm tomorrow.
+
+Ask SAGE:
+What did I promise to send and by when?
+
+Expected:
+one claim, one canonical fact, project text included.
+
+Send:
+Correction: I'll send you the Project Alpha budget by 9pm tomorrow instead.
+
+Ask SAGE:
+When am I sending the Project Alpha budget now?
+
+Expected:
+latest fact should win; ideally replacement/supersession should show.
+
+Send:
+Rohan reports to Hrithik.
+
+Ask SAGE:
+Who does Rohan report to?
+
+Expected:
+clean canonical fact.
+
+Send:
+Rohan now reports to Anil.
+
+Ask SAGE:
+Who does Rohan report to now?
+
+Expected:
+old fact superseded, new one current.
+
+Send in a group chat:
+Can you send the deck?
+
+Ask SAGE:
+Who was asked to send the deck?
+
+Expected:
+ambiguity. This should not become a clean canonical fact.
+
+Send in a group chat:
+We have a Project Alpha review next Monday at 10am.
+
+Ask SAGE:
+When is the Project Alpha review?
+
+Expected:
+group-scoped meeting fact with normalized time.
+
+If you want the highest-signal order, do 1 -> 2 -> 3 -> 4 first.
+That sequence tests:
+
+grounding
+temporal normalization
+conflict/supersession
+stable canonical retrieval
+
+
+
+
+Next patch I’d recommend:
+
+capture trailing qualifiers like For Project Alpha
+render names instead of raw IDs in the insight UI
+
+Long-answer prompts to validate structured `long` mode
+
+Give me a detailed summary of everything we know about Project Beta, including meetings, bugs, preparation work, and follow-up actions.
+
+Compare Project Beta and Project Gamma based on the chat history, and explain the people involved, timelines, and next steps.
+
+Explain all dashboard-related conversations with Elijah, including design review, brand guidelines, and dark mode status.
+
+Give me a detailed overview of Project Alpha across the chats, including API work, marketing materials, meetings, and promised deliverables.
+
+Walk me through everything we know about Project Phoenix, including ownership, billing work, meetings, and technical coordination.

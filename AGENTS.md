@@ -4,7 +4,11 @@ Purpose: keep agent work in this repo consistent, safe, and fast.
 
 ## 1) Project Ground Rules
 - Use `uv` and the local `.venv` for all Python work.
-- Run Python commands as `uv run python ...`.
+- Always activate `.venv` before running any backend command:
+  - `cd SAGE-Enterprise-Graph-RAG`
+  - `source .venv/bin/activate`
+- Use `uv` for dependency management; do not use `pip install`.
+- Run commands with `uv run ...`; do not use `python3 ...`.
 - Keep runnable utilities in `scripts/`.
 - Keep data inputs in `data/` and generated analysis in `results/`.
 - Do not hardcode secrets or API keys in code.
