@@ -29,19 +29,39 @@ GRAPH_VECTOR_QUERY = """
     ORDER BY similarity DESC
     LIMIT 3
     MATCH (c)-[r]-(n)
-    RETURN c.chunk_id AS chunk_id, c.summary AS chunk_summary, d, similarity, type(r) as relationship, n
+    WITH c, d, similarity, r, n, (d)<-[:PART_OF]-(c)-[r]-(n) AS path
+    RETURN
+        c.chunk_id AS chunk_id,
+        c.summary AS chunk_summary,
+        d,
+        similarity,
+        type(r) AS relationship,
+        n,
+        size(relationships(path)) AS hop_count,
+        [x IN nodes(path) | coalesce(x.subject, x.title, x.name, x.id, x.doc_id, labels(x)[0])] AS path_nodes,
+        [x IN relationships(path) | type(x)] AS path_relationships
 """
 
 PERSON_GRAPH_VECTOR_QUERY = """
-    MATCH (p:Person {id: $user_id})
-    MATCH (p)-[:SENT|RECEIVED_BY]-(d:Document)<-[:PART_OF]-(c:Chunk)
+    MATCH (person:Person {id: $user_id})
+    MATCH (person)-[:SENT|RECEIVED_BY]-(d:Document)<-[:PART_OF]-(c:Chunk)
     WHERE c.embedding IS NOT NULL
     WITH c, d, c.embedding AS chunk_embedding, $query_embedding AS query_embedding
     WITH c, d, gds.similarity.cosine(chunk_embedding, query_embedding) AS similarity
     ORDER BY similarity DESC
     LIMIT 3
     MATCH (c)-[r]-(n)
-    RETURN c.chunk_id AS chunk_id, c.summary AS chunk_summary, d, similarity, type(r) as relationship, n
+    WITH person, c, d, similarity, r, n, (person)-[:SENT|RECEIVED_BY]-(d)<-[:PART_OF]-(c)-[r]-(n) AS path
+    RETURN
+        c.chunk_id AS chunk_id,
+        c.summary AS chunk_summary,
+        d,
+        similarity,
+        type(r) AS relationship,
+        n,
+        size(relationships(path)) AS hop_count,
+        [x IN nodes(path) | coalesce(x.subject, x.title, x.name, x.id, x.doc_id, labels(x)[0])] AS path_nodes,
+        [x IN relationships(path) | type(x)] AS path_relationships
 """
 
 FIRST_PERSON_PATTERN = re.compile(r"\b(i|me|my|mine|myself)\b", re.IGNORECASE)
@@ -216,6 +236,57 @@ def _build_path_summary(user_scoped: bool, related_label: Optional[str]) -> Dict
     }
 
 
+def _build_evidence_path(*, scope: str, relationship: str, related_label: Optional[str], doc_id: Optional[str], chunk_id: Optional[str]) -> Dict[str, Any]:
+    """Build a traceable, relationship-based path label and hop count.
+
+    This is not a shortest-path computation; it's a concrete chain that mirrors the
+    retrieval pattern used by the vector query results.
+    """
+
+    parts: List[str] = []
+    hops = 0
+
+    if scope == "user":
+        parts.append("Person")
+        parts.append("-(SENT|RECEIVED_BY)-")
+        parts.append(f"Document({doc_id or 'unknown'})")
+        hops += 1
+    else:
+        parts.append(f"Document({doc_id or 'unknown'})")
+
+    parts.append("<-PART_OF-")
+    parts.append(f"Chunk({chunk_id or 'unknown'})")
+    hops += 1
+
+    if related_label:
+        parts.append(f"-{relationship}-")
+        parts.append(related_label)
+        hops += 1
+
+    return {"path": " ".join(parts), "hop_count": hops}
+
+
+def _build_path_string(path_nodes: Any, path_relationships: Any) -> Optional[str]:
+    try:
+        nodes_list = [str(x) for x in (path_nodes or []) if x is not None]
+        rels_list = [str(x) for x in (path_relationships or []) if x is not None]
+    except Exception:
+        return None
+
+    if not nodes_list:
+        return None
+
+    # If relationships align with nodes (n rels, n+1 nodes), interleave for readability.
+    if rels_list and len(nodes_list) == len(rels_list) + 1:
+        parts: List[str] = [nodes_list[0]]
+        for rel, node in zip(rels_list, nodes_list[1:]):
+            parts.append(f"-{rel}-")
+            parts.append(node)
+        return " ".join(parts)
+
+    return " -> ".join(nodes_list)
+
+
 def _merge_ranked_results(primary: List[Dict[str, Any]], secondary: List[Dict[str, Any]], limit: int = 5) -> List[Dict[str, Any]]:
     by_chunk: Dict[str, Dict[str, Any]] = {}
     for row in primary + secondary:
@@ -275,6 +346,11 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                     query_embedding=query_embedding.tolist(),
                 ).data()
 
+        for row in global_results:
+            row["_scope"] = "global"
+        for row in person_results:
+            row["_scope"] = "user"
+
         vector_results = _merge_ranked_results(person_results, global_results, limit=5)
         evidence: List[Dict[str, Any]] = []
         documents: List[str] = []
@@ -285,13 +361,33 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
             related_node = _serialize_neo4j_entity(item.get("n"))
             related_label = _get_primary_label(related_node) if related_node else None
             related_name = _get_display_name(related_node) if related_node else None
-            path_summary = _build_path_summary(personalized_lookup, related_label)
 
             sender = document.get("sender")
             subject = document.get("subject")
             doc_id = document.get("doc_id")
             similarity = round(float(item.get("similarity", 0) or 0), 4)
             relationship = item.get("relationship") or "RELATED_TO"
+
+            hop_count_value = item.get("hop_count")
+            computed_hop_count: Optional[int]
+            try:
+                computed_hop_count = int(hop_count_value) if hop_count_value is not None else None
+            except (TypeError, ValueError):
+                computed_hop_count = None
+
+            computed_path = _build_path_string(item.get("path_nodes"), item.get("path_relationships"))
+
+            if computed_hop_count is None or not computed_path:
+                scope = str(item.get("_scope") or ("user" if personalized_lookup else "global"))
+                fallback = _build_evidence_path(
+                    scope=scope,
+                    relationship=str(relationship),
+                    related_label=related_label,
+                    doc_id=doc_id,
+                    chunk_id=item.get("chunk_id"),
+                )
+                computed_hop_count = computed_hop_count if computed_hop_count is not None else int(fallback["hop_count"])
+                computed_path = computed_path or str(fallback["path"])
 
             for candidate in (sender, subject, related_name):
                 if candidate and candidate not in matched_entities:
@@ -302,8 +398,8 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                 "chunk_summary": item.get("chunk_summary", "No summary"),
                 "similarity": similarity,
                 "relationship": relationship,
-                "retrieval_path": path_summary["path"],
-                "hop_count": path_summary["hop_count"],
+                "retrieval_path": computed_path,
+                "hop_count": computed_hop_count,
                 "document": {
                     "doc_id": doc_id,
                     "subject": subject,
@@ -314,7 +410,7 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                 "related_node": {
                     "label": related_label,
                     "display_name": related_name,
-                    "id": related_node.get("id"),
+                    "id": related_node.get("id") or related_node.get("_element_id"),
                 } if related_node else {},
             }
             evidence.append(evidence_item)

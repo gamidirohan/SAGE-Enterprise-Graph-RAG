@@ -76,6 +76,31 @@ class GraphDebugResponse(BaseModel):
     entity_doc_connections: List[Dict[str, Any]]
 
 
+class GraphPathNode(BaseModel):
+    element_id: str
+    labels: List[str] = Field(default_factory=list)
+    display_name: str
+    properties: Dict[str, Any] = Field(default_factory=dict)
+
+
+class GraphPathRelationship(BaseModel):
+    type: str
+    source: str
+    target: str
+
+
+class GraphRetrievalPathResponse(BaseModel):
+    hop_count: int
+    nodes: List[GraphPathNode] = Field(default_factory=list)
+    relationships: List[GraphPathRelationship] = Field(default_factory=list)
+
+
+class GraphSubgraphResponse(BaseModel):
+    depth: int
+    nodes: List[GraphPathNode] = Field(default_factory=list)
+    relationships: List[GraphPathRelationship] = Field(default_factory=list)
+
+
 class UserSyncRequest(BaseModel):
     id: str
     name: str
@@ -556,6 +581,268 @@ async def debug_graph_endpoint():
     except Exception as exc:
         logger.error("Graph debug failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Failed to inspect graph: {exc}") from exc
+    finally:
+        driver.close()
+
+
+def _node_to_path_node(node: Any) -> GraphPathNode:
+    labels = list(getattr(node, "labels", []))
+    element_id = getattr(node, "element_id", None) or getattr(node, "id", None) or str(node)
+
+    props: Dict[str, Any]
+    try:
+        props = dict(node.items())
+    except Exception:
+        try:
+            props = dict(node)
+        except Exception:
+            props = {}
+
+    display_name = None
+    for key in ("subject", "title", "name", "doc_id", "chunk_id", "id", "value"):
+        value = props.get(key)
+        if value:
+            display_name = str(value)
+            break
+    if not display_name:
+        display_name = str(labels[0]) if labels else "Node"
+
+    return GraphPathNode(
+        element_id=str(element_id),
+        labels=[str(label) for label in labels],
+        display_name=display_name,
+        properties={str(k): v for k, v in props.items()},
+    )
+
+
+@app.get("/api/debug-retrieval-path", response_model=GraphRetrievalPathResponse)
+async def debug_retrieval_path_endpoint(
+    chunk_id: str,
+    user_id: Optional[str] = None,
+    related_node_id: Optional[str] = None,
+    relationship: Optional[str] = None,
+):
+    """Return the concrete Neo4j hop path for a retrieved evidence chunk.
+
+    The path mirrors the retrieval pattern used by the vector query:
+    - Global: (Document)<-[:PART_OF]-(Chunk)-[r]-(n)
+    - Personalized: (Person)-[:SENT|RECEIVED_BY]-(Document)<-[:PART_OF]-(Chunk)-[r]-(n)
+    """
+
+    driver = utils.create_neo4j_driver()
+    try:
+        with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
+            rel_filter = ""
+            base_params: Dict[str, Any] = {"chunk_id": chunk_id}
+
+            if relationship:
+                rel_filter = ":" + relationship
+
+            related_where_clause = ""
+            if related_node_id:
+                base_params["related_node_id"] = related_node_id
+                related_where_clause = "WHERE n IS NULL OR elementId(n) = $related_node_id OR n.id = $related_node_id"
+
+            user_query = f"""
+            MATCH (c:Chunk {{chunk_id: $chunk_id}})-[:PART_OF]->(d:Document)
+            MATCH (p:Person {{id: $user_id}})-[pd:SENT|RECEIVED_BY]-(d)
+            OPTIONAL MATCH (c)-[r{rel_filter}]-(n)
+            {related_where_clause}
+            WITH p, pd, d, c, r, n
+            RETURN p AS p, type(pd) AS pd_type, d AS d, c AS c, type(r) AS r_type, n AS n
+            LIMIT 1
+            """
+
+            global_query = f"""
+            MATCH (c:Chunk {{chunk_id: $chunk_id}})-[:PART_OF]->(d:Document)
+            OPTIONAL MATCH (c)-[r{rel_filter}]-(n)
+            {related_where_clause}
+            WITH d, c, r, n
+            RETURN d AS d, c AS c, type(r) AS r_type, n AS n
+            LIMIT 1
+            """
+
+            rows: List[Dict[str, Any]] = []
+            if user_id:
+                params = dict(base_params)
+                params["user_id"] = user_id
+                rows = session.run(user_query, **params).data()
+
+                # Fallback: evidence can be global even when the query is user-scoped.
+                # In that case, the (Person)-[:SENT|RECEIVED_BY]-(Document) hop won't exist.
+                if not rows:
+                    rows = session.run(global_query, **base_params).data()
+            else:
+                rows = session.run(global_query, **base_params).data()
+
+            if not rows:
+                raise HTTPException(status_code=404, detail="No retrieval path found for the provided chunk_id")
+
+            row = rows[0]
+
+            nodes: List[GraphPathNode] = []
+            relationships_out: List[GraphPathRelationship] = []
+
+            # Core nodes
+            document_node = _node_to_path_node(row["d"])
+            chunk_node = _node_to_path_node(row["c"])
+
+            # Optional nodes
+            person_node = _node_to_path_node(row["p"]) if "p" in row and row.get("p") is not None else None
+            related_node = _node_to_path_node(row["n"]) if row.get("n") is not None else None
+
+            if person_node:
+                nodes.append(person_node)
+            nodes.extend([document_node, chunk_node])
+            if related_node:
+                nodes.append(related_node)
+
+            # Relationships as a simple chain
+            if person_node:
+                relationships_out.append(
+                    GraphPathRelationship(
+                        type=str(row.get("pd_type") or "SENT_OR_RECEIVED"),
+                        source=person_node.element_id,
+                        target=document_node.element_id,
+                    )
+                )
+
+            relationships_out.append(
+                GraphPathRelationship(
+                    type="PART_OF",
+                    source=chunk_node.element_id,
+                    target=document_node.element_id,
+                )
+            )
+
+            if related_node and row.get("r_type"):
+                relationships_out.append(
+                    GraphPathRelationship(
+                        type=str(row.get("r_type") or "RELATED_TO"),
+                        source=chunk_node.element_id,
+                        target=related_node.element_id,
+                    )
+                )
+
+            return GraphRetrievalPathResponse(
+                hop_count=len(relationships_out),
+                nodes=nodes,
+                relationships=relationships_out,
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Debug retrieval path failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to inspect retrieval path: {exc}") from exc
+    finally:
+        driver.close()
+
+
+@app.get("/api/debug-subgraph", response_model=GraphSubgraphResponse)
+async def debug_subgraph_endpoint(
+    chunk_id: str,
+    depth: int = 2,
+    node_limit: int = 80,
+    rel_limit: int = 120,
+):
+    """Return a neighborhood subgraph around a chunk for visualization.
+
+    This is meant for UI debugging: show the *actual* Neo4j nodes/relationships
+    near the Top-1 evidence chunk, up to `depth` hops.
+    """
+
+    safe_depth = max(1, min(int(depth), 4))
+    safe_node_limit = max(10, min(int(node_limit), 250))
+    safe_rel_limit = max(10, min(int(rel_limit), 400))
+
+    driver = utils.create_neo4j_driver()
+    try:
+        with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
+            nodes_query = f"""
+            MATCH (c:Chunk {{chunk_id: $chunk_id}})
+            MATCH p=(c)-[*0..{safe_depth}]-(m)
+            UNWIND nodes(p) AS n
+            WITH DISTINCT n
+            RETURN elementId(n) AS element_id,
+                   labels(n) AS labels,
+                   properties(n) AS props
+            LIMIT $node_limit
+            """
+
+            rels_query = f"""
+            MATCH (c:Chunk {{chunk_id: $chunk_id}})
+            MATCH p=(c)-[*1..{safe_depth}]-(m)
+            UNWIND relationships(p) AS r
+            WITH DISTINCT r
+            RETURN elementId(startNode(r)) AS source,
+                   elementId(endNode(r)) AS target,
+                   type(r) AS type
+            LIMIT $rel_limit
+            """
+
+            node_rows = session.run(
+                nodes_query,
+                chunk_id=chunk_id,
+                node_limit=safe_node_limit,
+            ).data()
+            rel_rows = session.run(
+                rels_query,
+                chunk_id=chunk_id,
+                rel_limit=safe_rel_limit,
+            ).data()
+
+        nodes_out: List[GraphPathNode] = []
+        for row in node_rows:
+            labels = [str(label) for label in (row.get("labels") or [])]
+            element_id = str(row.get("element_id") or "")
+            props = row.get("props") or {}
+            if not isinstance(props, dict):
+                try:
+                    props = dict(props)
+                except Exception:
+                    props = {}
+
+            display_name = None
+            for key in ("subject", "title", "name", "doc_id", "chunk_id", "id", "value"):
+                value = props.get(key)
+                if value:
+                    display_name = str(value)
+                    break
+            if not display_name:
+                display_name = labels[0] if labels else "Node"
+
+            nodes_out.append(
+                GraphPathNode(
+                    element_id=element_id,
+                    labels=labels,
+                    display_name=display_name,
+                    properties={str(k): v for k, v in props.items()},
+                )
+            )
+
+        rels_out = [
+            GraphPathRelationship(
+                type=str(row.get("type") or "RELATED_TO"),
+                source=str(row.get("source") or ""),
+                target=str(row.get("target") or ""),
+            )
+            for row in rel_rows
+            if row.get("source") and row.get("target")
+        ]
+
+        if not nodes_out:
+            raise HTTPException(status_code=404, detail="No subgraph found for the provided chunk_id")
+
+        return GraphSubgraphResponse(
+            depth=safe_depth,
+            nodes=nodes_out,
+            relationships=rels_out,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Debug subgraph failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to load subgraph: {exc}") from exc
     finally:
         driver.close()
 
