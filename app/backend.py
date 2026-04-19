@@ -700,7 +700,7 @@ async def process_document(
 
 
 @app.get("/api/debug-graph", response_model=GraphDebugResponse)
-async def debug_graph_endpoint():
+async def debug_graph_endpoint(summary_only: bool = False):
     driver = utils.create_neo4j_driver()
     try:
         with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
@@ -718,6 +718,14 @@ async def debug_graph_endpoint():
                 ORDER BY Count DESC
                 """
             ).data()
+            if summary_only:
+                return {
+                    "node_counts": node_counts,
+                    "rel_counts": rel_counts,
+                    "sample_docs": [],
+                    "connectivity": [],
+                    "entity_doc_connections": [],
+                }
             sample_docs = session.run(
                 """
                 MATCH (d:Document)

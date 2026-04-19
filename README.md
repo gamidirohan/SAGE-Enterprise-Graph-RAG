@@ -94,7 +94,7 @@ Default URL: `http://localhost:8501`
 ### 2) FastAPI Backend
 
 ```bash
-uv run python app/backend.py
+uv run uvicorn app.backend:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Default URL: `http://localhost:8000`

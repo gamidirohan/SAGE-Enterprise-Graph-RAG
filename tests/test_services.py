@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from app import services
 
 
@@ -32,6 +34,25 @@ def test_graph_vector_queries_exclude_sage_documents():
     assert "NOT coalesce(d.source, '') STARTS WITH 'sage_'" in services.GRAPH_VECTOR_QUERY
     assert "coalesce(d.conversation_type, '') <> 'sage'" in services.PERSON_GRAPH_VECTOR_QUERY
     assert "NOT coalesce(d.source, '') STARTS WITH 'sage_'" in services.PERSON_GRAPH_VECTOR_QUERY
+    assert "relationships(path)" not in services.GRAPH_VECTOR_QUERY
+    assert "relationships(path)" not in services.PERSON_GRAPH_VECTOR_QUERY
+
+
+def test_classify_query_marks_multi_part_lookup_as_compound():
+    assert services._classify_query("What's the new project? When's the orientation? Who all know it so far?") == "compound_lookup"
+
+
+def test_build_answer_payload_converts_iso_utc_timestamps_to_ist():
+    payload = services._build_answer_payload(
+        mode="long",
+        reason_code="evidence_complexity",
+        summary="Project Alpha review is scheduled for 2026-04-20T10:00:00+00:00.",
+        bullets=["Budget goes out at 2026-04-13T18:00:00+00:00."],
+        retrieval_trace=None,
+    )
+
+    assert payload["summary"] == "Project Alpha review is scheduled for 2026-04-20 03:30 PM IST."
+    assert payload["bullets"] == ["Budget goes out at 2026-04-13 11:30 PM IST."]
 
 
 class _Ctx:
@@ -106,6 +127,55 @@ def test_query_graph_with_trace_returns_evidence(monkeypatch):
     assert result["trace"]["max_hop_count"] >= 2
     assert result["trace"]["evidence"][0]["document"]["doc_id"] == "doc-1"
     assert "Charlie Davis" in result["trace"]["matched_entities"]
+    assert driver.closed is True
+
+
+def test_query_graph_with_trace_gives_recent_messages_a_soft_rank_boost(monkeypatch):
+    now = datetime(2026, 4, 19, 12, 0, tzinfo=timezone.utc)
+
+    def handler(query, _params):
+        if "MATCH (c:Chunk)-[:PART_OF]->(d:Document)" in query:
+            return [
+                {
+                    "chunk_id": "chunk-old",
+                    "chunk_summary": "Project Alpha review happened in the older thread.",
+                    "d": {
+                        "doc_id": "doc-old",
+                        "subject": "Old thread",
+                        "sender": "u1",
+                        "timestamp": "2026-02-01T09:00:00+00:00",
+                    },
+                    "similarity": 0.95,
+                    "relationship": "PART_OF",
+                    "n": {"id": "topic-alpha", "name": "Project Alpha", "_labels": ["Topic"]},
+                },
+                {
+                    "chunk_id": "chunk-recent",
+                    "chunk_summary": "Project Alpha review is this Monday at 10am.",
+                    "d": {
+                        "doc_id": "doc-recent",
+                        "subject": "Recent thread",
+                        "sender": "u2",
+                        "timestamp": "2026-04-18T09:00:00+00:00",
+                    },
+                    "similarity": 0.81,
+                    "relationship": "PART_OF",
+                    "n": {"id": "topic-alpha", "name": "Project Alpha", "_labels": ["Topic"]},
+                },
+            ]
+        return []
+
+    session = _DispatchSession(handler)
+    driver = _Driver(session)
+
+    monkeypatch.setattr(services.utils, "create_neo4j_driver", lambda: driver)
+    monkeypatch.setattr(services.utils, "get_cached_embedding_model", lambda: _Model())
+    monkeypatch.setattr(services, "_utcnow", lambda: now)
+
+    result = services.query_graph_with_trace("When is the Project Alpha review?")
+
+    assert result["trace"]["evidence"][0]["chunk_id"] == "chunk-recent"
+    assert result["trace"]["evidence"][0]["rank_score"] > result["trace"]["evidence"][1]["rank_score"]
     assert driver.closed is True
 
 
@@ -388,6 +458,62 @@ def test_query_graph_with_trace_filters_group_request_lookup_to_object_terms(mon
     assert driver.closed is True
 
 
+def test_query_graph_with_trace_compound_lookup_keeps_mixed_evidence_and_filters_noisy_entities(monkeypatch):
+    def handler(query, _params):
+        if "MATCH (c:Chunk)-[:PART_OF]->(d:Document)" in query:
+            return [
+                {
+                    "chunk_id": "chat-msg-m1-chunk-0",
+                    "chunk_summary": "We have a Project Alpha review next Monday at 10am.",
+                    "d": {"doc_id": "chat-msg-m1", "subject": "Chat message m1", "sender": "currentUser"},
+                    "similarity": 0.61,
+                    "rank_score": 0.74,
+                    "relationship": "PART_OF",
+                    "n": {"id": "group1", "name": "Project Alpha", "_labels": ["Topic"]},
+                }
+            ]
+        if "MATCH (f:CanonicalFact)" in query:
+            return [
+                {
+                    "fact_id": "fact-1",
+                    "fact_summary": "Project Alpha review is scheduled for 2026-04-20T10:00:00Z",
+                    "f": {
+                        "fact_id": "fact-1",
+                        "canonical_key": "meeting::group1::project-alpha-review",
+                        "claim_type": "MEETING_EVENT",
+                        "status": "current",
+                        "subject_key": "group1",
+                        "subject_entity_id": "group1",
+                        "object_key": None,
+                        "object_entity_id": None,
+                        "temporal_start": "2026-04-20T10:00:00Z",
+                        "temporal_granularity": "datetime",
+                    },
+                    "d": {"doc_id": "chat-msg-m1", "subject": "Chat message m1", "sender": "currentUser", "source": "chat_message"},
+                    "similarity": 0.58,
+                }
+            ]
+        return []
+
+    session = _DispatchSession(handler)
+    driver = _Driver(session)
+
+    monkeypatch.setattr(services.utils, "create_neo4j_driver", lambda: driver)
+    monkeypatch.setattr(services.utils, "get_cached_embedding_model", lambda: _Model())
+
+    result = services.query_graph_with_trace("What's the new project? When's the orientation? Who all know it so far")
+
+    assert result["trace"]["query_type"] == "compound_lookup"
+    assert result["trace"]["result_count"] == 2
+    assert any(item.get("fact_id") == "fact-1" for item in result["trace"]["evidence"])
+    assert any(item.get("chunk_id") == "chat-msg-m1-chunk-0" for item in result["trace"]["evidence"])
+    assert "Project Alpha" in result["trace"]["matched_entities"]
+    assert "currentUser" not in result["trace"]["matched_entities"]
+    assert "Chat message m1" not in result["trace"]["matched_entities"]
+    assert "group1" not in result["trace"]["matched_entities"]
+    assert driver.closed is True
+
+
 def test_generate_groq_response_builds_fact_first_context(monkeypatch):
     captured = {}
 
@@ -442,11 +568,11 @@ def test_generate_groq_response_builds_fact_first_context(monkeypatch):
         retrieval_trace=trace,
     )
 
-    assert result["answer"] == "You promised to send the report by 2026-04-02T20:00:00Z."
+    assert result["answer"] == "You promised to send the report by 2026-04-03 01:30 AM IST."
     assert result["answer_payload"]["mode"] == "short"
     assert result["answer_payload"]["reason_code"] == "direct_lookup"
     assert result["answer_payload"]["evidence_refs"] == ["fact:fact-1", "chunk:chunk-1"]
-    assert result["answer_payload"]["bullets"] == ["Recipient: u2", "Time: 2026-04-02T20:00:00Z"]
+    assert result["answer_payload"]["bullets"] == ["Recipient: u2", "Time: 2026-04-03 01:30 AM IST"]
     assert captured["user_context"].endswith("Query classification: task_commitment_lookup.")
     assert captured["retrieval_guidance"].startswith("This is a task or commitment lookup.")
     assert captured["answer_mode"] == "short"

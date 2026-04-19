@@ -6,8 +6,11 @@ chat response generation, and other domain-level application behavior.
 
 import json
 import logging
+import math
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import numpy as np
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
@@ -22,6 +25,13 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+IST_TIMEZONE = ZoneInfo("Asia/Kolkata")
+ISO_OFFSET_TIMESTAMP_PATTERN = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\b"
+)
+RECENCY_BOOST_MAX = 0.18
+RECENCY_DECAY_DAYS = 21.0
+
 GRAPH_VECTOR_QUERY = """
     MATCH (c:Chunk)-[:PART_OF]->(d:Document)
     WHERE c.embedding IS NOT NULL
@@ -32,7 +42,7 @@ GRAPH_VECTOR_QUERY = """
     ORDER BY similarity DESC
     LIMIT 3
     MATCH (c)-[r]-(n)
-    WITH c, d, similarity, r, n, (d)<-[:PART_OF]-(c)-[r]-(n) AS path
+    WITH c, d, similarity, r, n
     RETURN
         c.chunk_id AS chunk_id,
         c.summary AS chunk_summary,
@@ -40,14 +50,18 @@ GRAPH_VECTOR_QUERY = """
         similarity,
         type(r) AS relationship,
         n,
-        size(relationships(path)) AS hop_count,
-        [x IN nodes(path) | coalesce(x.subject, x.title, x.name, x.id, x.doc_id, labels(x)[0])] AS path_nodes,
-        [x IN relationships(path) | type(x)] AS path_relationships
+        2 AS hop_count,
+        [
+            coalesce(d.subject, d.title, d.name, d.id, d.doc_id, labels(d)[0]),
+            coalesce(c.subject, c.title, c.name, c.id, c.doc_id, c.chunk_id, labels(c)[0]),
+            coalesce(n.subject, n.title, n.name, n.id, n.doc_id, labels(n)[0])
+        ] AS path_nodes,
+        ['PART_OF', type(r)] AS path_relationships
 """
 
 PERSON_GRAPH_VECTOR_QUERY = """
     MATCH (person:Person {id: $user_id})
-    MATCH (person)-[:SENT|RECEIVED_BY]-(d:Document)<-[:PART_OF]-(c:Chunk)
+    MATCH (person)-[pd:SENT|RECEIVED_BY]-(d:Document)<-[:PART_OF]-(c:Chunk)
     WHERE c.embedding IS NOT NULL
       AND coalesce(d.conversation_type, '') <> 'sage'
       AND NOT coalesce(d.source, '') STARTS WITH 'sage_'
@@ -56,7 +70,7 @@ PERSON_GRAPH_VECTOR_QUERY = """
     ORDER BY similarity DESC
     LIMIT 3
     MATCH (c)-[r]-(n)
-    WITH person, c, d, similarity, r, n, (person)-[:SENT|RECEIVED_BY]-(d)<-[:PART_OF]-(c)-[r]-(n) AS path
+    WITH person, pd, c, d, similarity, r, n
     RETURN
         c.chunk_id AS chunk_id,
         c.summary AS chunk_summary,
@@ -64,9 +78,14 @@ PERSON_GRAPH_VECTOR_QUERY = """
         similarity,
         type(r) AS relationship,
         n,
-        size(relationships(path)) AS hop_count,
-        [x IN nodes(path) | coalesce(x.subject, x.title, x.name, x.id, x.doc_id, labels(x)[0])] AS path_nodes,
-        [x IN relationships(path) | type(x)] AS path_relationships
+        3 AS hop_count,
+        [
+            coalesce(person.subject, person.title, person.name, person.id, person.doc_id, labels(person)[0]),
+            coalesce(d.subject, d.title, d.name, d.id, d.doc_id, labels(d)[0]),
+            coalesce(c.subject, c.title, c.name, c.id, c.doc_id, c.chunk_id, labels(c)[0]),
+            coalesce(n.subject, n.title, n.name, n.id, n.doc_id, labels(n)[0])
+        ] AS path_nodes,
+        [type(pd), 'PART_OF', type(r)] AS path_relationships
 """
 
 FACT_VECTOR_QUERY = """
@@ -206,6 +225,7 @@ DIRECT_LOOKUP_PREFIX = re.compile(r"^\s*(who|whom|what|when|which|did|do|does|is
 QUERY_NAME_PATTERN = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b")
 QUERY_EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 QUERY_TOKEN_PATTERN = re.compile(r"\b[a-zA-Z][a-zA-Z0-9_\-]{2,}\b")
+COMPOUND_LOOKUP_PATTERN = re.compile(r"\b(what|when|who|whom|which)\b", re.IGNORECASE)
 QUERY_FOCUS_STOPWORDS = {
     "a",
     "an",
@@ -411,10 +431,22 @@ def _looks_like_task_lookup(text: str) -> bool:
     return _contains_first_person(text) and any(token in lowered for token in ("what", "which", "when", "am i", "did i", "do i", "have i"))
 
 
+def _looks_like_compound_lookup(text: str) -> bool:
+    normalized = _normalize_query_text(text)
+    if normalized.count("?") > 1:
+        return True
+    interrogatives = {match.group(1).lower() for match in COMPOUND_LOOKUP_PATTERN.finditer(text or "")}
+    if len(interrogatives) >= 2:
+        return True
+    return "who all" in normalized and any(token in interrogatives for token in {"what", "when", "which"})
+
+
 def _classify_query(text: str) -> str:
     lowered = text.lower()
     if _looks_like_task_lookup(text):
         return "task_commitment_lookup"
+    if _looks_like_compound_lookup(text):
+        return "compound_lookup"
     if _contains_first_person(text):
         return "personal_context"
     if any(token in lowered for token in ("weekend", "today", "tomorrow", "schedule", "meeting", "plan")):
@@ -427,6 +459,8 @@ def _classify_query(text: str) -> str:
 
 
 def _looks_like_broad_or_explanatory_request(text: str, query_type: Optional[str]) -> bool:
+    if query_type == "compound_lookup":
+        return True
     if query_type == "explanation":
         return True
     normalized = _normalize_query_text(text)
@@ -436,6 +470,8 @@ def _looks_like_broad_or_explanatory_request(text: str, query_type: Optional[str
 
 
 def _looks_like_direct_lookup_request(text: str, query_type: Optional[str]) -> bool:
+    if query_type == "compound_lookup":
+        return False
     if query_type in FACT_PRIORITY_QUERY_TYPES:
         return True
     if query_type in {"schedule_or_timeline", "person_lookup"} and DIRECT_LOOKUP_PREFIX.search(text):
@@ -456,6 +492,8 @@ def _select_answer_mode(query: str, retrieval_trace: Optional[Dict[str, Any]] = 
         return ANSWER_MODE_SHORT, REASON_CODE_EXPLICIT_SHORT
     if _contains_phrase(query, LONG_OVERRIDE_PHRASES):
         return ANSWER_MODE_LONG, REASON_CODE_EXPLICIT_LONG
+    if query_type == "compound_lookup":
+        return ANSWER_MODE_LONG, REASON_CODE_EVIDENCE_COMPLEXITY
     if _looks_like_broad_or_explanatory_request(query, query_type):
         return ANSWER_MODE_LONG, REASON_CODE_BROAD_OR_EXPLANATORY
     if _looks_like_direct_lookup_request(query, query_type):
@@ -512,6 +550,61 @@ def _normalize_bullets(values: Any) -> List[str]:
     return [value for value in bullets if value]
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_timestamp_as_ist(value: str) -> str:
+    parsed = _parse_iso_timestamp(value)
+    if parsed is None:
+        return value
+    localized = parsed.astimezone(IST_TIMEZONE)
+    return localized.strftime("%Y-%m-%d %I:%M %p IST")
+
+
+def _convert_iso_timestamps_to_ist_text(text: str) -> str:
+    if not text:
+        return text
+    return ISO_OFFSET_TIMESTAMP_PATTERN.sub(lambda match: _format_timestamp_as_ist(match.group(0)), text)
+
+
+def _extract_row_recency_timestamp(row: Dict[str, Any]) -> Optional[datetime]:
+    document = _serialize_neo4j_entity(row.get("d"))
+    fact = _serialize_neo4j_entity(row.get("f"))
+    for candidate in (
+        document.get("timestamp"),
+        fact.get("last_seen_at"),
+        fact.get("first_seen_at"),
+    ):
+        parsed = _parse_iso_timestamp(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _compute_recency_rank_boost(row: Dict[str, Any]) -> float:
+    timestamp = _extract_row_recency_timestamp(row)
+    if timestamp is None:
+        return 0.0
+    age_days = max((_utcnow() - timestamp).total_seconds() / 86400.0, 0.0)
+    return RECENCY_BOOST_MAX * math.exp(-age_days / RECENCY_DECAY_DAYS)
+
+
 def _build_fallback_summary(query: str, documents: List[str], retrieval_trace: Optional[Dict[str, Any]] = None) -> str:
     if not documents or not (retrieval_trace or {}).get("evidence"):
         return (
@@ -530,7 +623,7 @@ def _build_answer_payload(
     bullets: List[str],
     retrieval_trace: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    normalized_summary = _normalize_summary_text(summary)
+    normalized_summary = _convert_iso_timestamps_to_ist_text(_normalize_summary_text(summary))
     if not normalized_summary:
         normalized_summary = "I couldn't produce a readable answer from the available evidence."
 
@@ -541,7 +634,7 @@ def _build_answer_payload(
         "mode": mode,
         "reason_code": reason_code,
         "summary": normalized_summary,
-        "bullets": _normalize_bullets(bullets),
+        "bullets": [_convert_iso_timestamps_to_ist_text(value) for value in _normalize_bullets(bullets)],
         "explanation": _build_answer_explanation(mode, reason_code),
         "evidence_refs": _derive_evidence_refs(retrieval_trace=retrieval_trace),
     }
@@ -662,6 +755,39 @@ def _extract_query_focus_terms(query: str) -> List[str]:
     return focus_terms
 
 
+def _is_displayable_trace_entity(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+
+    lowered = text.lower()
+    if lowered in {"currentuser", "unknown", "node", "group", "sage"}:
+        return False
+    if lowered.startswith("chat message "):
+        return False
+    if lowered.startswith("chat-msg-") or "-chunk-" in lowered:
+        return False
+    if lowered.startswith("assignment::") or lowered.startswith("meeting::") or lowered.startswith("reports_to::"):
+        return False
+    if lowered.startswith("direct:") or lowered.startswith("group") or lowered.startswith("message-attachment-"):
+        return False
+    if re.fullmatch(r"[0-9]+", text):
+        return False
+    if re.fullmatch(r"[0-9a-f]{32,64}", lowered):
+        return False
+    if not re.search(r"[a-zA-Z]", text):
+        return False
+    return True
+
+
+def _append_matched_entity(matched_entities: List[str], candidate: Any) -> None:
+    text = str(candidate or "").strip()
+    if not _is_displayable_trace_entity(text):
+        return
+    if text not in matched_entities:
+        matched_entities.append(text)
+
+
 def _is_reports_to_lookup(query: str) -> bool:
     normalized = (query or "").lower()
     return "report to" in normalized or "reports to" in normalized
@@ -777,12 +903,15 @@ def _prepare_chunk_result(
 ) -> Dict[str, Any]:
     ranked = dict(row)
     focus_score = _focus_match_score(row, list(focus_terms or []))
+    recency_boost = _compute_recency_rank_boost(row)
     rank_score = float(row.get("similarity", 0) or 0)
     if focus_score:
         rank_score += 0.35 * focus_score
     if reports_to_lookup and "reports to" in str(row.get("chunk_summary") or "").lower():
         rank_score += 0.3
+    rank_score += recency_boost
     ranked["focus_match_score"] = focus_score
+    ranked["recency_boost"] = recency_boost
     ranked["rank_score"] = rank_score
     return ranked
 
@@ -800,6 +929,7 @@ def _prepare_fact_result(
     ranked = dict(row)
     fact = _serialize_neo4j_entity(row.get("f"))
     similarity = float(row.get("similarity", 0) or 0)
+    recency_boost = _compute_recency_rank_boost(row)
     rank_score = similarity
     focus_score = _focus_match_score(row, list(focus_terms or []))
 
@@ -820,8 +950,10 @@ def _prepare_fact_result(
         rank_score += 0.35 * focus_score
     if reports_to_lookup and fact.get("claim_type") == "REPORTS_TO":
         rank_score += 0.4
+    rank_score += recency_boost
 
     ranked["focus_match_score"] = focus_score
+    ranked["recency_boost"] = recency_boost
     ranked["rank_score"] = rank_score
     return ranked
 
@@ -1046,9 +1178,9 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                     fact.get("object_entity_id"),
                     supporting_document.get("subject"),
                     supporting_document.get("sender"),
+                    item.get("related_node", {}).get("display_name") if isinstance(item.get("related_node"), dict) else None,
                 ):
-                    if candidate and candidate not in matched_entities:
-                        matched_entities.append(str(candidate))
+                    _append_matched_entity(matched_entities, candidate)
 
                 evidence_item = {
                     "fact_id": fact_id,
@@ -1138,8 +1270,7 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                 computed_path = computed_path or str(fallback["path"])
 
             for candidate in (sender, subject, related_name):
-                if candidate and candidate not in matched_entities:
-                    matched_entities.append(str(candidate))
+                _append_matched_entity(matched_entities, candidate)
 
             evidence_item = {
                 "chunk_id": item.get("chunk_id"),

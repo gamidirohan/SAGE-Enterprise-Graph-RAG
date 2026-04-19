@@ -133,6 +133,50 @@ def test_extract_claims_from_text_supports_progressive_commitment_with_grounding
     assert grounding["references"][1]["raw"] == "you"
 
 
+def test_resolve_reference_maps_we_and_us_to_group_scope():
+    context = saia.GroundingContext(
+        source_kind="chat_message",
+        source_doc_id="chat-msg-group-1",
+        source_message_id="group-1",
+        linked_message_id=None,
+        sender_id="u1",
+        receiver_ids=["u2", "u3"],
+        conversation_id="group:g1",
+        conversation_type="group",
+        group_id="group1",
+        sent_at="2026-04-01T10:00:00Z",
+    )
+
+    we_resolution = saia._resolve_reference("we", context, allow_pronouns=True)
+    us_resolution = saia._resolve_reference("us", context, allow_pronouns=True)
+
+    assert we_resolution.status == "resolved"
+    assert we_resolution.entity_id == "group1"
+    assert us_resolution.status == "resolved"
+    assert us_resolution.entity_id == "group1"
+
+
+def test_resolve_reference_leaves_it_unresolved_until_coreference_support_exists():
+    context = saia.GroundingContext(
+        source_kind="chat_message",
+        source_doc_id="chat-msg-direct-1",
+        source_message_id="direct-1",
+        linked_message_id=None,
+        sender_id="u1",
+        receiver_ids=["u2"],
+        conversation_id="direct:u1:u2",
+        conversation_type="direct",
+        group_id=None,
+        sent_at="2026-04-01T10:00:00Z",
+    )
+
+    resolution = saia._resolve_reference("it", context, allow_pronouns=True)
+
+    assert resolution.status == "unresolved"
+    assert resolution.entity_id is None
+    assert resolution.key is None
+
+
 def test_extract_claims_from_text_canonicalizes_email_sender_and_receiver_to_person_ids():
     class _EmailIdentitySession:
         def run(self, query, **params):
@@ -830,3 +874,53 @@ def test_collect_message_insight_returns_preview_claims_for_skipped_message(monk
     assert preview_claim["grounding"]["references"][0]["display_name"] == "Alice"
     assert preview_claim["grounding"]["references"][1]["display_name"] == "Bob"
     assert insight["summary"]["preview_claim_count"] == 1
+
+
+def test_collect_message_insight_returns_preview_claims_when_saia_is_disabled(monkeypatch):
+    monkeypatch.delenv("SAIA_ENABLED", raising=False)
+
+    def handler(query, params, _calls):
+        if "MATCH (m:Message {id: $message_id})" in query and "RETURN m" in query:
+            return [
+                {
+                    "m": _Node(
+                        {
+                            "id": "m-disabled",
+                            "content": "I'll send you the report tomorrow.",
+                            "source": "chat_message",
+                            "sender_id": "u1",
+                            "receiver_id": "u2",
+                            "conversation_id": "direct:u1:u2",
+                            "conversation_type": "direct",
+                            "group_id": None,
+                            "sent_at": "2026-04-12T08:29:06.790Z",
+                            "is_ai_response": False,
+                        }
+                    )
+                }
+            ]
+        if "UNWIND $entity_ids AS entity_id" in query:
+            display_names = {
+                "u1": "Alice",
+                "u2": "Bob",
+            }
+            return [
+                {"entity_id": entity_id, "display_name": display_names.get(entity_id, entity_id)}
+                for entity_id in params.get("entity_ids", [])
+            ]
+        if "OPTIONAL MATCH (u:User {id: $entity_id})" in query:
+            display_names = {
+                "u1": "Alice",
+                "u2": "Bob",
+            }
+            entity_id = params.get("entity_id")
+            return [{"display_name": display_names.get(entity_id, entity_id)}]
+        return []
+
+    insight = saia.collect_message_insight(_Session(handler=handler), "m-disabled")
+
+    assert insight["saia_status"] == "disabled"
+    assert insight["saia_error"] == "SAIA processing is disabled in backend configuration."
+    assert insight["claims"] == []
+    assert len(insight["preview_claims"]) == 1
+    assert insight["preview_claims"][0]["preview_only"] is True

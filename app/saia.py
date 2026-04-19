@@ -36,6 +36,7 @@ ALLOW_AI_AUTHORED_EVIDENCE = os.getenv("SAIA_ALLOW_AI_AUTHORED_EVIDENCE", "false
 FIRST_PERSON_TOKENS = {"i", "me", "my", "mine", "myself"}
 SECOND_PERSON_TOKENS = {"you", "your", "yours", "yourself", "yourselves"}
 FIRST_PERSON_PLURAL_TOKENS = {"we", "our", "ours", "us", "ourselves"}
+NEUTRAL_ANAPHORA_TOKENS = {"it", "its", "itself", "this", "that", "these", "those", "they", "them", "their", "theirs"}
 CONTEXTUAL_CONTINUATION_PREFIXES = {"for", "regarding", "about", "re", "under", "within", "on", "by", "at"}
 
 COMMITMENT_VERB_MAP = {
@@ -874,6 +875,10 @@ def _resolve_reference(raw: str, context: GroundingContext, session: Any = None,
     canonical_token = re.sub(r"^(?:the|a|an)\s+", "", token, flags=re.IGNORECASE).strip() or token
     lowered = canonical_token.lower()
     if allow_pronouns and context.source_kind in {"chat_message", "message_attachment"}:
+        # TODO(agentic): Neutral anaphora such as "it", "this", "that", and "they"
+        # should be resolved by a future planner/coreference agent, not this lexical resolver.
+        if lowered in NEUTRAL_ANAPHORA_TOKENS:
+            return Resolution(raw=raw, key=None, entity_id=None, entity_type=None, status="unresolved", display_name=None)
         if lowered in FIRST_PERSON_TOKENS:
             return _resolved_sender(context, session=session, raw=raw)
         if lowered in SECOND_PERSON_TOKENS:
@@ -1453,9 +1458,10 @@ def collect_message_insight(session: Any, message_id: str) -> Dict[str, Any]:
     return {
         "message_id": message_id,
         "message_source": message.get("source"),
-        "saia_status": message.get("saia_status"),
+        "saia_status": message.get("saia_status") or ("disabled" if not is_enabled() else None),
         "saia_processed_at": message.get("saia_processed_at"),
-        "saia_error": message.get("saia_error"),
+        "saia_error": message.get("saia_error")
+        or ("SAIA processing is disabled in backend configuration." if not is_enabled() else None),
         "source_documents": source_documents,
         "runs": runs,
         "claims": claims,
@@ -1646,8 +1652,6 @@ def _load_json_blob(raw: Any) -> Dict[str, Any]:
 
 
 def _preview_message_claims(session: Any, message_id: str, message: Dict[str, Any]) -> List[Dict[str, Any]]:
-    if not is_enabled():
-        return []
     content = _prepare_text(message.get("content") or "")
     if not content:
         return []

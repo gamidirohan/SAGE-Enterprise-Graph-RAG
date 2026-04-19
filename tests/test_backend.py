@@ -255,6 +255,29 @@ def test_sync_messages_endpoint(monkeypatch):
     assert result["failed"] == 0
 
 
+def test_debug_graph_endpoint_summary_only_skips_expensive_sections(monkeypatch):
+    def handler(query, **_params):
+        if "MATCH (n)" in query:
+            return [{"Label": "Document", "Count": 3}]
+        if "MATCH ()-[r]->()" in query:
+            return [{"RelationType": "PART_OF", "Count": 4}]
+        raise AssertionError(f"Unexpected query executed: {query}")
+
+    session = _Session(handler=handler)
+    driver = _Driver(session=session)
+    monkeypatch.setattr(backend.utils, "create_neo4j_driver", lambda: driver)
+    monkeypatch.setattr(backend.utils, "open_neo4j_session", lambda _driver, _database: _Ctx(session))
+
+    result = asyncio.run(backend.debug_graph_endpoint(summary_only=True))
+
+    assert result["node_counts"] == [{"Label": "Document", "Count": 3}]
+    assert result["rel_counts"] == [{"RelationType": "PART_OF", "Count": 4}]
+    assert result["sample_docs"] == []
+    assert result["connectivity"] == []
+    assert result["entity_doc_connections"] == []
+    assert driver.closed is True
+
+
 def test_process_document_unsupported_extension_raises_http_exception():
     file = UploadFile(filename="bad.csv", file=io.BytesIO(b"hello"))
     with pytest.raises(HTTPException) as exc:
