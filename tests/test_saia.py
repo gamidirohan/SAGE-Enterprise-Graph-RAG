@@ -317,6 +317,54 @@ def test_extract_claims_from_text_reports_to_uses_person_lookup():
     assert claim["resolution_status"] == "resolved"
 
 
+def test_extract_claims_from_text_supports_named_my_manager_phrase():
+    context = saia.GroundingContext(
+        source_kind="chat_message",
+        source_doc_id="chat-msg-mgr-1",
+        source_message_id="mgr-1",
+        linked_message_id=None,
+        sender_id="u1",
+        receiver_ids=["u2"],
+        conversation_id="direct:u1:u2",
+        conversation_type="direct",
+        group_id=None,
+        sent_at="2026-04-01T10:00:00Z",
+    )
+
+    claims = saia.extract_claims_from_text("Bijade is my manager.", context, session=_FakeNameSession())
+
+    assert len(claims) == 1
+    claim = claims[0]
+    assert claim["claim_type"] == "REPORTS_TO"
+    assert claim["subject_entity_id"] == "u1"
+    assert claim["object_entity_id"] is None or claim["object_entity_id"] == "bijade-id"
+    assert claim["normalized_text"].lower().endswith("reports to bijade")
+
+
+def test_process_chat_message_no_claims_is_succeeded_with_reason(monkeypatch):
+    session = _Session()
+    _patch_saia_runtime(monkeypatch, session)
+    monkeypatch.setattr(saia, "_is_source_eligible", lambda _context, _content: True)
+    monkeypatch.setattr(saia, "extract_claims_from_text", lambda *_args, **_kwargs: [])
+
+    result = saia.process_chat_message(
+        message_id="m1",
+        sender_id="u1",
+        receiver_ids=["u2"],
+        conversation_id="direct:u1:u2",
+        conversation_type="direct",
+        group_id=None,
+        sent_at="2026-04-01T10:00:00Z",
+        content="hello there",
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["reason"] == "no_claims"
+    persisted_run = next(call for call in session.calls if "MERGE (r:SAIARun" in call["query"])
+    assert persisted_run["params"]["status"] == "succeeded"
+    assert persisted_run["params"]["errors_json"] == '{"reason": "no_claims"}'
+
+
 def test_extract_claims_from_text_reports_to_prefers_exact_user_person_match_over_duplicate_name():
     class _DuplicateNameSession:
         def run(self, query, **params):
@@ -407,6 +455,36 @@ def test_extract_claims_from_text_supports_manager_assertion_paraphrase():
     assert claim["resolution_status"] == "resolved"
 
 
+def test_process_chat_message_promotes_exact_manager_assertion_without_punctuation(monkeypatch):
+    session = _Session()
+    _patch_saia_runtime(monkeypatch, session)
+
+    result = saia.process_chat_message(
+        message_id="manager-exact",
+        sender_id="u1",
+        receiver_ids=["u2"],
+        conversation_id="direct:u1:u2",
+        conversation_type="direct",
+        group_id=None,
+        sent_at="2026-04-28T16:00:24.834Z",
+        content="From now on I'm your only Manager Bijade",
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["claims_extracted"] == 1
+    assert result["claims_canonicalized"] == 1
+    persisted_run = [call for call in session.calls if "MERGE (r:SAIARun" in call["query"]][-1]
+    source_writes = [call for call in session.calls if "SET m.saia_status = $status" in call["query"]]
+    claim_writes = [call for call in session.calls if "MERGE (c:Claim {claim_id: $claim_id})" in call["query"]]
+
+    assert persisted_run["params"]["status"] == "succeeded"
+    assert persisted_run["params"]["errors_json"] is None
+    assert source_writes[-1]["params"]["status"] == "succeeded"
+    assert claim_writes[0]["params"]["claim_type"] == "REPORTS_TO"
+    assert claim_writes[0]["params"]["subject_entity_id"] == "u2"
+    assert claim_writes[0]["params"]["object_entity_id"] == "u1"
+
+
 def test_extract_claims_from_text_merges_llm_assisted_claims(monkeypatch):
     context = saia.GroundingContext(
         source_kind="chat_message",
@@ -446,6 +524,30 @@ def test_extract_claims_from_text_merges_llm_assisted_claims(monkeypatch):
     assert any(claim["claim_type"] == "REPORTS_TO" for claim in claims)
 
 
+def test_llm_candidate_without_source_span_uses_safe_fallback():
+    context = saia.GroundingContext(
+        source_kind="chat_message",
+        source_doc_id="chat-msg-manager-llm",
+        source_message_id="manager-llm",
+        linked_message_id=None,
+        sender_id="u1",
+        receiver_ids=["u2"],
+        conversation_id="direct:u1:u2",
+        conversation_type="direct",
+        group_id=None,
+        sent_at="2026-04-28T16:00:24.834Z",
+    )
+    candidate = saia._SAIALLMCandidate(relation="manages", subject="I", object="you", confidence=0.8)
+
+    claim = saia._build_claim_from_llm_candidate(candidate, context)
+
+    assert claim is not None
+    assert claim["claim_type"] == "REPORTS_TO"
+    assert claim["subject_entity_id"] == "u2"
+    assert claim["object_entity_id"] == "u1"
+    assert claim["source_span_text"] == "I manages you"
+
+
 def test_process_chat_message_promotes_direct_commitment_to_canonical_fact(monkeypatch):
     session = _Session()
     driver = _patch_saia_runtime(monkeypatch, session)
@@ -461,7 +563,7 @@ def test_process_chat_message_promotes_direct_commitment_to_canonical_fact(monke
         content="I'll send you the report tomorrow.",
     )
 
-    assert result["status"] == "completed"
+    assert result["status"] == "succeeded"
     assert result["claims_extracted"] >= 1
     assert result["claims_canonicalized"] == 1
     assert driver.closed is True
@@ -518,7 +620,7 @@ def test_process_chat_message_confirms_existing_fact_without_creating_duplicate(
         content="I'll send you the report tomorrow.",
     )
 
-    assert result["status"] == "completed"
+    assert result["status"] == "succeeded"
     assert result["claims_canonicalized"] == 1
     assert not any("MERGE (f:CanonicalFact {fact_id: $fact_id})" in call["query"] for call in session.calls)
     assert any("SUPPORTS" in call["query"] and call["params"].get("fact_id") == "fact-existing" for call in session.calls)
@@ -540,7 +642,7 @@ def test_process_chat_message_group_request_creates_claim_but_no_canonical_fact(
         content="Can you send the file?",
     )
 
-    assert result["status"] == "completed"
+    assert result["status"] == "succeeded"
     assert result["claims_extracted"] == 1
     assert result["claims_canonicalized"] == 0
     assert any("MERGE (c:Claim {claim_id: $claim_id})" in call["query"] for call in session.calls)
@@ -590,7 +692,7 @@ def test_process_chat_message_supersedes_conflicting_reports_to_fact(monkeypatch
         content="Bob now reports to Charlie.",
     )
 
-    assert result["status"] == "completed"
+    assert result["status"] == "succeeded"
     assert result["claims_canonicalized"] == 1
     assert result["conflicts_found"] == 1
     assert any("SUPERSEDED_BY" in call["query"] for call in session.calls)
@@ -623,7 +725,7 @@ def test_process_message_attachment_links_provenance_without_rewriting_raw_conte
         attachment_name="org-update.txt",
     )
 
-    assert result["status"] == "completed"
+    assert result["status"] == "succeeded"
     assert result["claims_canonicalized"] == 1
     assert any("HAS_EVIDENCE_DOCUMENT" in call["query"] for call in session.calls)
     assert all("SET d.content" not in call["query"] for call in session.calls)
@@ -741,7 +843,7 @@ def test_process_message_attachment_passive_approval_promotes_canonical_fact(mon
         attachment_name="approval.txt",
     )
 
-    assert result["status"] == "completed"
+    assert result["status"] == "succeeded"
     assert result["claims_canonicalized"] == 1
     fact_writes = [
         call
@@ -796,7 +898,7 @@ def test_process_chat_message_assignment_end_supersedes_current_fact(monkeypatch
         content="Bob is no longer working on Project A.",
     )
 
-    assert result["status"] == "completed"
+    assert result["status"] == "succeeded"
     assert result["claims_canonicalized"] == 1
     assert result["conflicts_found"] == 1
     assert any("SUPERSEDED_BY" in call["query"] for call in session.calls)
@@ -840,7 +942,7 @@ def test_process_chat_message_corrected_commitment_supersedes_existing_fact(monk
         content="Correction: I'll send you the Project Alpha budget by 9pm tomorrow instead.",
     )
 
-    assert result["status"] == "completed"
+    assert result["status"] == "succeeded"
     assert result["claims_canonicalized"] == 1
     assert result["conflicts_found"] == 1
     fact_writes = [
@@ -870,7 +972,7 @@ def test_process_chat_message_records_mutation_action_for_new_fact(monkeypatch):
         content="I'll send you the report tomorrow.",
     )
 
-    assert result["status"] == "completed"
+    assert result["status"] == "succeeded"
     mutation_updates = [
         call
         for call in session.calls
@@ -924,7 +1026,7 @@ def test_collect_message_insight_returns_preview_claims_for_skipped_message(monk
 
     insight = saia.collect_message_insight(_Session(handler=handler), "m-preview")
 
-    assert insight["saia_status"] == "not_processed"
+    assert insight["saia_status"] == "skipped"
     assert insight["claims"] == []
     assert len(insight["preview_claims"]) == 1
     preview_claim = insight["preview_claims"][0]
@@ -954,12 +1056,12 @@ def test_process_chat_message_persists_not_processed_for_skipped_runs(monkeypatc
         content="hello there",
     )
 
-    assert result["status"] == "skipped"
+    assert result["status"] == "succeeded"
     run_writes = [call for call in session.calls if "MERGE (r:SAIARun {run_id: $run_id})" in call["query"]]
     source_writes = [call for call in session.calls if "SET m.saia_status = $status" in call["query"]]
 
-    assert run_writes[-1]["params"]["status"] == "not_processed"
-    assert source_writes[-1]["params"]["status"] == "not_processed"
+    assert run_writes[-1]["params"]["status"] == "succeeded"
+    assert source_writes[-1]["params"]["status"] == "succeeded"
 
 
 def test_collect_message_insight_returns_preview_claims_when_saia_is_disabled(monkeypatch):

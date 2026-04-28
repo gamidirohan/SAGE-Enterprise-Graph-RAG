@@ -171,7 +171,7 @@ def test_chat_endpoint_uses_query_and_generator(monkeypatch):
         },
     )
 
-    request = backend.ChatRequest(message="hi", history=[])
+    request = backend.ChatRequest(message="hi", history=[], agentic_mode=False)
     result = asyncio.run(backend.chat_endpoint(request))
     assert result["answer"] == "ok"
     assert result["answer_payload"]["summary"] == "ok"
@@ -201,7 +201,7 @@ def test_chat_endpoint_builds_fallback_answer_payload_with_evidence_refs(monkeyp
         },
     )
 
-    request = backend.ChatRequest(message="hi", history=[])
+    request = backend.ChatRequest(message="hi", history=[], agentic_mode=False)
     result = asyncio.run(backend.chat_endpoint(request))
 
     assert result["answer"] == "Fallback answer"
@@ -236,6 +236,79 @@ def test_chat_endpoint_agentic_mode_routes_to_orchestrator(monkeypatch):
     assert result["answer"] == "agentic answer"
     assert result["trace"]["agentic"]["enabled"] is True
     assert result["thinking"] == ["Planner selected graph retrieval."]
+
+
+def test_chat_endpoint_defaults_to_agentic_mode(monkeypatch):
+    monkeypatch.setattr(
+        backend.agentic,
+        "run_agentic_query",
+        lambda _message, user_id=None, history=None: {
+            "answer": "default agentic",
+            "answer_payload": {
+                "schema_version": 1,
+                "mode": "short",
+                "reason_code": "direct_lookup",
+                "summary": "default agentic",
+                "bullets": [],
+                "explanation": "agentic default",
+                "evidence_refs": ["chunk:chunk-1"],
+            },
+            "thinking": ["Planner selected semantic retrieval."],
+            "trace": {"agentic": {"enabled": True}, "evidence": [{"chunk_id": "chunk-1"}]},
+        },
+    )
+
+    request = backend.ChatRequest(message="hi", history=[], user_id="u1")
+    result = asyncio.run(backend.chat_endpoint(request))
+
+    assert result["answer"] == "default agentic"
+    assert result["trace"]["agentic"]["enabled"] is True
+
+
+def test_chat_stream_endpoint_emits_progress_and_final(monkeypatch):
+    def fake_run_agentic_query(_message, user_id=None, history=None, event_sink=None):
+        event_sink(
+            {
+                "event_id": "evt-1",
+                "run_id": "run-1",
+                "timestamp": "2026-04-28T00:00:00+00:00",
+                "event_type": "agent_started",
+                "agent": "planner",
+                "stage": "plan",
+                "status": "running",
+                "message": "Planner is identifying intent.",
+            }
+        )
+        return {
+            "answer": "streamed answer",
+            "answer_payload": {
+                "schema_version": 1,
+                "mode": "short",
+                "reason_code": "direct_lookup",
+                "summary": "streamed answer",
+                "bullets": [],
+                "explanation": "agentic stream",
+                "evidence_refs": ["chunk:chunk-1"],
+            },
+            "thinking": ["Planner selected semantic retrieval."],
+            "trace": {"agentic": {"enabled": True}, "evidence": [{"chunk_id": "chunk-1"}]},
+        }
+
+    async def collect_stream(response):
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
+        return "".join(chunks)
+
+    monkeypatch.setattr(backend.agentic, "run_agentic_query", fake_run_agentic_query)
+
+    response = asyncio.run(backend.chat_stream_endpoint(backend.ChatRequest(message="hi", history=[], user_id="u1")))
+    body = asyncio.run(collect_stream(response))
+
+    assert "event: progress" in body
+    assert "Planner is identifying intent." in body
+    assert "event: final" in body
+    assert "streamed answer" in body
 
 
 def test_health_check_endpoint():

@@ -7,15 +7,18 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import queue
 import shutil
 import sys
-from typing import Any, Dict, List, Literal, Optional
+import threading
+from typing import Any, Dict, Iterator, List, Literal, Optional
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from neo4j.exceptions import ServiceUnavailable, SessionExpired
 from pydantic import BaseModel, Field
 
@@ -57,7 +60,7 @@ class ChatRequest(BaseModel):
     message: str
     history: Optional[List[Dict[str, str]]] = Field(default_factory=list)
     user_id: Optional[str] = None
-    agentic_mode: bool = False
+    agentic_mode: bool = True
 
 
 class AnswerPayload(BaseModel):
@@ -82,6 +85,66 @@ class ChatResponse(BaseModel):
     answer_payload: AnswerPayload
     thinking: List[str] = Field(default_factory=list)
     trace: Dict[str, Any] = Field(default_factory=dict)
+
+
+def _fallback_answer_payload(result: Dict[str, Any], trace: Dict[str, Any]) -> Dict[str, Any]:
+    return result.get("answer_payload") or {
+        "schema_version": 1,
+        "mode": "short",
+        "reason_code": "fallback_invalid_json",
+        "summary": result.get("answer", "") or "I couldn't produce a readable answer from the available evidence.",
+        "bullets": [],
+        "explanation": "SAGE returned a safe short answer because the detailed response could not be formatted reliably.",
+        "evidence_refs": services._derive_evidence_refs(retrieval_trace=trace),
+    }
+
+
+def _format_sse(event_name: str, payload: Dict[str, Any]) -> str:
+    return f"event: {event_name}\ndata: {json.dumps(payload, default=str)}\n\n"
+
+
+def _stream_agentic_chat(request: ChatRequest, message: str) -> Iterator[str]:
+    event_queue: queue.Queue = queue.Queue()
+
+    def event_sink(event: Dict[str, Any]) -> None:
+        event_queue.put(("progress", event))
+
+    def worker() -> None:
+        try:
+            result = agentic.run_agentic_query(
+                message,
+                user_id=request.user_id,
+                history=request.history,
+                event_sink=event_sink,
+            )
+            trace = result.get("trace") or {}
+            answer_payload = _fallback_answer_payload(result, trace)
+            event_queue.put(
+                (
+                    "final",
+                    {
+                        "answer": answer_payload.get("summary", result.get("answer", "")),
+                        "answer_payload": answer_payload,
+                        "thinking": result.get("thinking") or [],
+                        "trace": trace,
+                    },
+                )
+            )
+        except Exception as exc:  # pragma: no cover - exercised through streaming integration
+            logger.exception("Agentic chat stream failed")
+            event_queue.put(("error", {"detail": str(exc)}))
+        finally:
+            event_queue.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    yield _format_sse("progress", {"event_type": "stream_opened", "status": "running", "message": "SAGE stream opened."})
+    while True:
+        item = event_queue.get()
+        if item is None:
+            break
+        event_name, payload = item
+        yield _format_sse(event_name, payload)
 
 
 class DocumentProcessResponse(BaseModel):
@@ -277,18 +340,23 @@ def _normalize_saia_status(status: Optional[str], *, default: str = "not_process
         "succeeded": "succeeded",
         "failed": "failed",
         "disabled": "disabled",
-        "skipped": "not_processed",
+        "running": "running",
+        "skipped": "skipped",
         "not_processed": "not_processed",
     }.get(normalized, normalized)
 
 
 def _saia_warning_message(status: str, reason: Optional[str]) -> Optional[str]:
+    humanized_reason = {
+        "no_claims": "No claims were extracted for this message.",
+        "source_ineligible": "This message was not eligible for SAIA processing.",
+    }.get((reason or "").strip().lower(), reason)
     if status == "disabled":
-        return reason or "SAIA processing is disabled in backend configuration."
+        return humanized_reason or "SAIA processing is disabled in backend configuration."
     if status == "failed":
-        return reason or "SAIA processing failed."
-    if status == "not_processed" and reason:
-        return reason
+        return humanized_reason or "SAIA processing failed."
+    if status in {"succeeded", "not_processed", "skipped"} and humanized_reason:
+        return humanized_reason
     return None
 
 
@@ -627,15 +695,7 @@ async def chat_endpoint(request: ChatRequest):
             history=request.history,
         )
         trace = result.get("trace") or {}
-        answer_payload = result.get("answer_payload") or {
-            "schema_version": 1,
-            "mode": "short",
-            "reason_code": "fallback_invalid_json",
-            "summary": result.get("answer", "") or "I couldn't produce a readable answer from the available evidence.",
-            "bullets": [],
-            "explanation": "SAGE returned a safe short answer because the detailed response could not be formatted reliably.",
-            "evidence_refs": services._derive_evidence_refs(retrieval_trace=trace),
-        }
+        answer_payload = _fallback_answer_payload(result, trace)
         return {
             "answer": answer_payload.get("summary", result.get("answer", "")),
             "answer_payload": answer_payload,
@@ -651,15 +711,7 @@ async def chat_endpoint(request: ChatRequest):
         retrieval_trace=graph_result.get("trace"),
     )
     trace = {**(graph_result.get("trace") or {}), **((ai_result.get("trace") or {}) if isinstance(ai_result, dict) else {})}
-    answer_payload = ai_result.get("answer_payload") or {
-        "schema_version": 1,
-        "mode": "short",
-        "reason_code": "fallback_invalid_json",
-        "summary": ai_result.get("answer", "") or "I couldn't produce a readable answer from the available evidence.",
-        "bullets": [],
-        "explanation": "SAGE returned a safe short answer because the detailed response could not be formatted reliably.",
-        "evidence_refs": services._derive_evidence_refs(retrieval_trace=trace),
-    }
+    answer_payload = _fallback_answer_payload(ai_result, trace)
 
     return {
         "answer": answer_payload.get("summary", ai_result.get("answer", "")),
@@ -667,6 +719,25 @@ async def chat_endpoint(request: ChatRequest):
         "thinking": ai_result.get("thinking") or [],
         "trace": trace,
     }
+
+
+@app.post("/api/chat/stream")
+async def chat_stream_endpoint(request: ChatRequest):
+    message = request.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Message is required")
+    if not request.agentic_mode:
+        result = await chat_endpoint(request)
+        return StreamingResponse(
+            iter([_format_sse("final", result)]),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    return StreamingResponse(
+        _stream_agentic_chat(request, message),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/process-document", response_model=DocumentProcessResponse)

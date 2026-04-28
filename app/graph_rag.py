@@ -185,9 +185,9 @@ render_chat_history()
 render_graph_debug()
 st.checkbox(
     "Agentic mode",
-    value=st.session_state.get("agentic_mode", False),
+    value=st.session_state.get("agentic_mode", True),
     key="agentic_mode",
-    help="Use the planner / retriever / reasoner / critic scaffold.",
+    help="Use the planner / retrieval tools / reasoner / critic pipeline.",
 )
 
 col1, col2 = st.columns([4, 1])

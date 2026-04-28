@@ -130,7 +130,7 @@ NAMED_COMMITMENT_PATTERN = re.compile(
 
 class _SAIALLMCandidate(BaseModel):
     relation: str
-    source_span_text: str
+    source_span_text: Optional[str] = None
     subject: Optional[str] = None
     object: Optional[str] = None
     value_text: Optional[str] = None
@@ -306,27 +306,40 @@ def process_text(content: str, context: GroundingContext) -> Dict[str, Any]:
 
     cleaned_content = _prepare_text(content)
     driver = utils.create_neo4j_driver()
+    run_id = _make_run_id(context)
     try:
         with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
             if not _is_source_eligible(context, cleaned_content):
                 result = _build_result("skipped", [], 0, 0)
-                _finalize_run(session, context, result, reason="source_ineligible")
+                _finalize_run(session, run_id, context, result, reason="source_ineligible")
                 return result
 
+            _mark_source_status(session, context, "running", None)
             claims = extract_claims_from_text(cleaned_content, context, session=session)
             if not claims:
-                result = _build_result("skipped", [], 0, 0)
-                _finalize_run(session, context, result, reason="no_claims")
+                # Treat “no claims” as a completed run, not a skip, to align with UI expectations and playbook.
+                affected_node_ids = _collect_affected_node_ids(context, [])
+                result = _build_result("succeeded", [], 0, 0)
+                result.update(
+                    {
+                        "changed_fact_ids": [],
+                        "affected_node_ids": affected_node_ids,
+                        "invalidated_query_ids": [],
+                        "reembed_target_ids": _select_reembed_targets(session, context, []),
+                        "diff_summary": {"changed_fact_count": 0, "mutation_counts": {}},
+                        "impact_summary": {"affected_node_count": len(affected_node_ids), "changed_fact_count": 0, "reembed_target_count": 0},
+                        "invalidation_summary": {"invalidated_query_count": 0},
+                    }
+                )
+                _finalize_run(session, run_id, context, result, reason="no_claims")
                 return result
 
             canonicalized = 0
             conflicts = 0
-            stored_claims = 0
-            run_id = _make_run_id(context)
+            changed_fact_ids: set[str] = set()
 
             _link_message_to_document(session, context)
             for claim in claims:
-                stored_claims += 1
                 claim["claim_id"] = _make_claim_id(context, claim)
                 claim["canonical_key"] = _build_canonical_key(claim)
                 claim["promotion_status"] = claim.get("promotion_status") or "pending"
@@ -347,6 +360,7 @@ def process_text(content: str, context: GroundingContext) -> Dict[str, Any]:
                     _touch_existing_fact(session, existing_fact_id)
                     claim["promotion_status"] = "confirmed"
                     claim["mutation_action"] = action
+                    changed_fact_ids.add(existing_fact_id)
                     _mark_claim_promotion(
                         session,
                         claim["claim_id"],
@@ -359,6 +373,7 @@ def process_text(content: str, context: GroundingContext) -> Dict[str, Any]:
                     _link_claim_to_fact(session, claim["claim_id"], fact_id, relation_type="SUPPORTS")
                     claim["promotion_status"] = "promoted"
                     claim["mutation_action"] = action
+                    changed_fact_ids.add(fact_id)
                     _mark_claim_promotion(
                         session,
                         claim["claim_id"],
@@ -371,6 +386,7 @@ def process_text(content: str, context: GroundingContext) -> Dict[str, Any]:
                     _supersede_existing_fact(session, existing_fact_id, fact_id)
                     _link_claim_to_fact(session, claim["claim_id"], fact_id, relation_type="SUPPORTS")
                     _link_claim_to_fact(session, claim["claim_id"], existing_fact_id, relation_type="CONTRADICTS")
+                    changed_fact_ids.update({existing_fact_id, fact_id})
                     conflicts += 1
                     claim["promotion_status"] = "promoted"
                     claim["mutation_action"] = action
@@ -394,9 +410,26 @@ def process_text(content: str, context: GroundingContext) -> Dict[str, Any]:
                         claim["mutation_action"],
                     )
 
-            result = _build_result("completed", claims, canonicalized, conflicts)
-            _persist_run(session, run_id, context, result)
-            _mark_source_status(session, context, "completed", None)
+            affected_node_ids = _collect_affected_node_ids(context, claims)
+            invalidated_query_ids = _invalidate_related_queries(
+                session,
+                context,
+                sorted({*affected_node_ids, *changed_fact_ids}),
+            )
+            reembed_target_ids = _select_reembed_targets(session, context, sorted(changed_fact_ids))
+            result = _build_result("succeeded", claims, canonicalized, conflicts)
+            result.update(
+                {
+                    "changed_fact_ids": sorted(changed_fact_ids),
+                    "affected_node_ids": affected_node_ids,
+                    "invalidated_query_ids": invalidated_query_ids,
+                    "reembed_target_ids": reembed_target_ids,
+                    "diff_summary": _build_diff_summary(claims, changed_fact_ids),
+                    "impact_summary": _build_impact_summary(affected_node_ids, changed_fact_ids, reembed_target_ids),
+                    "invalidation_summary": _build_invalidation_summary(invalidated_query_ids),
+                }
+            )
+            _finalize_run(session, run_id, context, result, reason=None)
             return result
     except Exception as exc:
         logger.exception("SAIA processing failed for %s", context.source_doc_id)
@@ -409,8 +442,15 @@ def process_text(content: str, context: GroundingContext) -> Dict[str, Any]:
                     "claims_canonicalized": 0,
                     "conflicts_found": 0,
                     "reason": str(exc),
+                    "changed_fact_ids": [],
+                    "affected_node_ids": [],
+                    "invalidated_query_ids": [],
+                    "reembed_target_ids": [],
+                    "diff_summary": {"changed_fact_count": 0, "mutation_counts": {}},
+                    "impact_summary": {"affected_node_count": 0, "changed_fact_count": 0, "reembed_target_count": 0},
+                    "invalidation_summary": {"invalidated_query_count": 0},
                 }
-                _persist_run(session, _make_run_id(context), context, result)
+                _persist_run(session, run_id, context, result)
         except Exception:  # pragma: no cover - best effort
             logger.exception("Failed to record SAIA failure for %s", context.source_doc_id)
         return {"status": "failed", "claims_extracted": 0, "claims_canonicalized": 0, "conflicts_found": 0, "reason": str(exc)}
@@ -466,6 +506,10 @@ def _extract_manager_claims(sentence: str, context: GroundingContext, session: A
         employee_text = "you"
     elif "my" in lowered_sentence and manager_lower in SECOND_PERSON_TOKENS:
         employee_text = "I"
+    elif "my" in lowered_sentence and manager_lower not in SECOND_PERSON_TOKENS:
+        employee_text = "I"
+    elif "your" in lowered_sentence and manager_lower not in FIRST_PERSON_TOKENS:
+        employee_text = "you"
     elif not employee_text:
         if manager_lower in FIRST_PERSON_TOKENS:
             employee_text = "you"
@@ -510,7 +554,12 @@ def _create_saia_llm_client():
 
 def _build_claim_from_llm_candidate(candidate: _SAIALLMCandidate, context: GroundingContext, session: Any = None) -> Optional[Dict[str, Any]]:
     relation = (candidate.relation or "").strip().lower()
-    span = _normalize_whitespace(candidate.source_span_text or "")
+    fallback_span = " ".join(
+        part
+        for part in [candidate.subject, relation.replace("_", " "), candidate.object or candidate.value_text]
+        if part
+    )
+    span = _normalize_whitespace(candidate.source_span_text or fallback_span)
     if not relation or not span:
         return None
 
@@ -1677,6 +1726,91 @@ def _facts_match(fact: Dict[str, Any], claim: Dict[str, Any]) -> bool:
     return all((fact.get(key) or "") == (claim.get(key) or "") for key in comparable_keys)
 
 
+def _collect_affected_node_ids(context: GroundingContext, claims: Sequence[Dict[str, Any]]) -> List[str]:
+    affected: set[str] = {context.source_doc_id}
+    if context.source_message_id:
+        affected.add(context.source_message_id)
+    if context.group_id:
+        affected.add(context.group_id)
+    if context.sender_id:
+        affected.add(context.sender_id)
+    for claim in claims:
+        for key in ("subject_entity_id", "object_entity_id", "subject_key", "object_key"):
+            value = claim.get(key)
+            if value:
+                affected.add(str(value))
+    return sorted(affected)
+
+
+def _select_reembed_targets(session: Any, context: GroundingContext, changed_fact_ids: Sequence[str]) -> List[str]:
+    targets: set[str] = {context.source_doc_id, *[str(item) for item in changed_fact_ids if item]}
+    rows = session.run(
+        """
+        MATCH (d:Document {doc_id: $doc_id})<-[:PART_OF]-(c:Chunk)
+        RETURN c.chunk_id AS chunk_id
+        ORDER BY c.chunk_id ASC
+        """,
+        doc_id=context.source_doc_id,
+    ).data()
+    for row in rows:
+        chunk_id = row.get("chunk_id")
+        if chunk_id:
+            targets.add(str(chunk_id))
+    return sorted(targets)
+
+
+def _invalidate_related_queries(session: Any, context: GroundingContext, tokens: Sequence[str]) -> List[str]:
+    normalized_tokens = [str(token) for token in tokens if str(token).strip()]
+    if not normalized_tokens:
+        return []
+    rows = session.run(
+        """
+        MATCH (m:Message)
+        WHERE coalesce(m.source, '') STARTS WITH 'sage_'
+          AND any(token IN $tokens WHERE coalesce(m.trace_json, '') CONTAINS token OR coalesce(m.answer_payload_json, '') CONTAINS token)
+        SET m.provenance_stale = true,
+            m.provenance_stale_at = $stale_at,
+            m.provenance_stale_reason = $source_doc_id
+        RETURN DISTINCT m.id AS id
+        ORDER BY id ASC
+        LIMIT 50
+        """,
+        tokens=normalized_tokens[:24],
+        stale_at=_utcnow_iso(),
+        source_doc_id=context.source_doc_id,
+    ).data()
+    return [str(row.get("id")) for row in rows if row.get("id")]
+
+
+def _build_diff_summary(claims: Sequence[Dict[str, Any]], changed_fact_ids: Sequence[str]) -> Dict[str, Any]:
+    mutation_counts: Dict[str, int] = {}
+    for claim in claims:
+        mutation_action = str(claim.get("mutation_action") or "unknown")
+        mutation_counts[mutation_action] = mutation_counts.get(mutation_action, 0) + 1
+    return {
+        "changed_fact_count": len(list(changed_fact_ids)),
+        "mutation_counts": mutation_counts,
+    }
+
+
+def _build_impact_summary(
+    affected_node_ids: Sequence[str],
+    changed_fact_ids: Sequence[str],
+    reembed_target_ids: Sequence[str],
+) -> Dict[str, Any]:
+    return {
+        "affected_node_count": len(list(affected_node_ids)),
+        "changed_fact_count": len(list(changed_fact_ids)),
+        "reembed_target_count": len(list(reembed_target_ids)),
+    }
+
+
+def _build_invalidation_summary(invalidated_query_ids: Sequence[str]) -> Dict[str, Any]:
+    return {
+        "invalidated_query_count": len(list(invalidated_query_ids)),
+    }
+
+
 def _normalize_status_for_insight(status: Optional[str], *, default: str) -> str:
     normalized = (status or "").strip().lower()
     if not normalized:
@@ -1686,7 +1820,8 @@ def _normalize_status_for_insight(status: Optional[str], *, default: str) -> str
         "succeeded": "succeeded",
         "failed": "failed",
         "disabled": "disabled",
-        "skipped": "not_processed",
+        "running": "running",
+        "skipped": "skipped",
         "not_processed": "not_processed",
     }.get(normalized, normalized)
 
@@ -1861,6 +1996,15 @@ def collect_message_insight(session: Any, message_id: str) -> Dict[str, Any]:
                 run["errors"]["reason"] = reason
             if raw:
                 run["errors"]["raw"] = raw
+        run["changed_fact_ids"] = _load_json_array(run.get("changed_fact_ids_json"))
+        run["affected_node_ids"] = _load_json_array(run.get("affected_node_ids_json"))
+        run["invalidated_query_ids"] = _load_json_array(run.get("invalidated_query_ids_json"))
+        run["reembed_target_ids"] = _load_json_array(run.get("reembed_target_ids_json"))
+        run["diff_summary"] = _load_json_blob(run.get("diff_summary_json"))
+        run["impact_summary"] = _load_json_blob(run.get("impact_summary_json"))
+        run["invalidation_summary"] = _load_json_blob(run.get("invalidation_summary_json"))
+        if run.get("errors") and not run.get("reason"):
+            run["reason"] = (run.get("errors") or {}).get("reason") or (run.get("errors") or {}).get("raw")
         runs.append(run)
 
     preview_claims: List[Dict[str, Any]] = []
@@ -1911,6 +2055,7 @@ def collect_message_insight(session: Any, message_id: str) -> Dict[str, Any]:
         run_error = (run.get("errors") or {}).get("reason") or (run.get("errors") or {}).get("raw")
         if run_error and run_error not in warnings:
             warnings.append(str(run_error))
+    latest_run = runs[-1] if runs else {}
 
     return {
         "message_id": message_id,
@@ -1925,6 +2070,10 @@ def collect_message_insight(session: Any, message_id: str) -> Dict[str, Any]:
         "preview_claims": preview_claims,
         "canonical_facts": canonical_facts,
         "replacements": replacements,
+        "diff_summary": latest_run.get("diff_summary") or {},
+        "impact_summary": latest_run.get("impact_summary") or {},
+        "invalidation_summary": latest_run.get("invalidation_summary") or {},
+        "reembed_target_ids": latest_run.get("reembed_target_ids") or [],
         "summary": {
             "document_count": len(source_documents),
             "run_count": len(runs),
@@ -1948,7 +2097,14 @@ def _persist_run(session: Any, run_id: str, context: GroundingContext, result: D
             r.claims_extracted = $claims_extracted,
             r.claims_canonicalized = $claims_canonicalized,
             r.conflicts_found = $conflicts_found,
-            r.errors_json = $errors_json
+            r.errors_json = $errors_json,
+            r.changed_fact_ids_json = $changed_fact_ids_json,
+            r.affected_node_ids_json = $affected_node_ids_json,
+            r.invalidated_query_ids_json = $invalidated_query_ids_json,
+            r.reembed_target_ids_json = $reembed_target_ids_json,
+            r.diff_summary_json = $diff_summary_json,
+            r.impact_summary_json = $impact_summary_json,
+            r.invalidation_summary_json = $invalidation_summary_json
         """,
         run_id=run_id,
         source_doc_id=context.source_doc_id,
@@ -1960,6 +2116,13 @@ def _persist_run(session: Any, run_id: str, context: GroundingContext, result: D
         claims_canonicalized=result.get("claims_canonicalized", 0),
         conflicts_found=result.get("conflicts_found", 0),
         errors_json=json.dumps({"reason": result.get("reason")}) if result.get("reason") else None,
+        changed_fact_ids_json=json.dumps(result.get("changed_fact_ids") or []),
+        affected_node_ids_json=json.dumps(result.get("affected_node_ids") or []),
+        invalidated_query_ids_json=json.dumps(result.get("invalidated_query_ids") or []),
+        reembed_target_ids_json=json.dumps(result.get("reembed_target_ids") or []),
+        diff_summary_json=json.dumps(result.get("diff_summary") or {}),
+        impact_summary_json=json.dumps(result.get("impact_summary") or {}),
+        invalidation_summary_json=json.dumps(result.get("invalidation_summary") or {}),
     )
     session.run(
         """
@@ -1972,12 +2135,12 @@ def _persist_run(session: Any, run_id: str, context: GroundingContext, result: D
     )
 
 
-def _finalize_run(session: Any, context: GroundingContext, result: Dict[str, Any], *, reason: Optional[str]) -> None:
+def _finalize_run(session: Any, run_id: str, context: GroundingContext, result: Dict[str, Any], *, reason: Optional[str]) -> None:
     result["reason"] = reason
     canonical_status = _normalize_status_for_insight(result.get("status"), default="not_processed")
     persisted_result = dict(result)
     persisted_result["status"] = canonical_status
-    _persist_run(session, _make_run_id(context), context, persisted_result)
+    _persist_run(session, run_id, context, persisted_result)
     _mark_source_status(session, context, canonical_status, reason)
 
 
@@ -2030,6 +2193,13 @@ def _build_result(status: str, claims: Sequence[Dict[str, Any]], canonicalized: 
         "claims_extracted": len(claims),
         "claims_canonicalized": canonicalized,
         "conflicts_found": conflicts,
+        "changed_fact_ids": [],
+        "affected_node_ids": [],
+        "invalidated_query_ids": [],
+        "reembed_target_ids": [],
+        "diff_summary": {},
+        "impact_summary": {},
+        "invalidation_summary": {},
     }
 
 
@@ -2109,6 +2279,18 @@ def _load_json_blob(raw: Any) -> Dict[str, Any]:
         return json.loads(raw)
     except (TypeError, json.JSONDecodeError):
         return {}
+
+
+def _load_json_array(raw: Any) -> List[Any]:
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return list(raw)
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return list(payload) if isinstance(payload, list) else []
 
 
 def _preview_message_claims(session: Any, message_id: str, message: Dict[str, Any]) -> List[Dict[str, Any]]:
