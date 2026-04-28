@@ -38,7 +38,19 @@ GRAPH_VECTOR_QUERY = """
       AND coalesce(d.conversation_type, '') <> 'sage'
       AND NOT coalesce(d.source, '') STARTS WITH 'sage_'
     WITH c, d, c.embedding AS chunk_embedding, $query_embedding AS query_embedding
-    WITH c, d, gds.similarity.cosine(chunk_embedding, query_embedding) AS similarity
+    WITH c, d,
+         gds.similarity.cosine(chunk_embedding, query_embedding) AS similarity,
+         c.timestamp AS chunk_ts,
+         d.timestamp AS doc_ts
+    WITH c, d, similarity,
+         coalesce(chunk_ts, doc_ts) AS recency_ts
+    WITH c, d, similarity,
+         recency_ts,
+         CASE
+             WHEN recency_ts IS NULL THEN 0.0
+             ELSE exp(-1.0 * duration.inDays(datetime(recency_ts), datetime()).days / $recency_decay_days) * $recency_boost_max
+         END AS recency_weight
+    WITH c, d, similarity + recency_weight AS similarity
     ORDER BY similarity DESC
     LIMIT 3
     MATCH (c)-[r]-(n)
@@ -65,8 +77,20 @@ PERSON_GRAPH_VECTOR_QUERY = """
     WHERE c.embedding IS NOT NULL
       AND coalesce(d.conversation_type, '') <> 'sage'
       AND NOT coalesce(d.source, '') STARTS WITH 'sage_'
-    WITH c, d, c.embedding AS chunk_embedding, $query_embedding AS query_embedding
-    WITH c, d, gds.similarity.cosine(chunk_embedding, query_embedding) AS similarity
+    WITH c, d, pd, c.embedding AS chunk_embedding, $query_embedding AS query_embedding
+    WITH c, d, pd,
+         gds.similarity.cosine(chunk_embedding, query_embedding) AS similarity,
+         c.timestamp AS chunk_ts,
+         d.timestamp AS doc_ts
+    WITH c, d, pd, similarity,
+         coalesce(chunk_ts, doc_ts) AS recency_ts
+    WITH c, d, pd, similarity,
+         recency_ts,
+         CASE
+             WHEN recency_ts IS NULL THEN 0.0
+             ELSE exp(-1.0 * duration.inDays(datetime(recency_ts), datetime()).days / $recency_decay_days) * $recency_boost_max
+         END AS recency_weight
+    WITH c, d, pd, similarity + recency_weight AS similarity
     ORDER BY similarity DESC
     LIMIT 3
     MATCH (c)-[r]-(n)
@@ -92,7 +116,15 @@ FACT_VECTOR_QUERY = """
     MATCH (f:CanonicalFact)
     WHERE f.status = 'current' AND f.embedding IS NOT NULL
     WITH f, f.embedding AS fact_embedding, $query_embedding AS query_embedding
-    WITH f, gds.similarity.cosine(fact_embedding, query_embedding) AS similarity
+    WITH f,
+         gds.similarity.cosine(fact_embedding, query_embedding) AS similarity,
+         coalesce(f.last_seen_at, f.first_seen_at) AS recency_ts
+    WITH f, similarity,
+         CASE
+             WHEN recency_ts IS NULL THEN 0.0
+             ELSE exp(-1.0 * duration.inDays(datetime(recency_ts), datetime()).days / $recency_decay_days) * $recency_boost_max
+         END AS recency_weight
+    WITH f, similarity + recency_weight AS similarity
     ORDER BY similarity DESC
     LIMIT 3
     OPTIONAL MATCH (f)<-[:SUPPORTS]-(claim:Claim)<-[:HAS_CLAIM]-(d:Document)
@@ -104,48 +136,15 @@ PERSON_FACT_VECTOR_QUERY = """
     MATCH (p:Person {id: $user_id})-[:HAS_FACT]-(f:CanonicalFact)
     WHERE f.status = 'current' AND f.embedding IS NOT NULL
     WITH f, f.embedding AS fact_embedding, $query_embedding AS query_embedding
-    WITH f, gds.similarity.cosine(fact_embedding, query_embedding) AS similarity
-    ORDER BY similarity DESC
-    LIMIT 3
-    OPTIONAL MATCH (f)<-[:SUPPORTS]-(claim:Claim)<-[:HAS_CLAIM]-(d:Document)
-    WITH f, similarity, collect(DISTINCT d)[0] AS d
-    RETURN f.fact_id AS fact_id, f.summary AS fact_summary, f, d, similarity
-"""
-
-PERSON_TASK_FACT_QUERY = """
-    MATCH (f:CanonicalFact)
-    WHERE f.status = 'current'
-      AND f.claim_type IN $claim_types
-      AND (
-        f.subject_entity_id = $user_id
-        OR f.subject_key = $user_id
-        OR f.object_entity_id = $user_id
-        OR f.object_key = $user_id
-      )
-    OPTIONAL MATCH (f)<-[:SUPPORTS]-(claim:Claim)<-[:HAS_CLAIM]-(d:Document)
-    WITH f, collect(DISTINCT d)[0] AS d
-    RETURN f.fact_id AS fact_id, f.summary AS fact_summary, f, d, 1.0 AS similarity
-    ORDER BY coalesce(f.last_seen_at, f.first_seen_at, '') DESC
-    LIMIT 5
-"""
-
-FACT_VECTOR_QUERY = """
-    MATCH (f:CanonicalFact)
-    WHERE f.status = 'current' AND f.embedding IS NOT NULL
-    WITH f, f.embedding AS fact_embedding, $query_embedding AS query_embedding
-    WITH f, gds.similarity.cosine(fact_embedding, query_embedding) AS similarity
-    ORDER BY similarity DESC
-    LIMIT 3
-    OPTIONAL MATCH (f)<-[:SUPPORTS]-(claim:Claim)<-[:HAS_CLAIM]-(d:Document)
-    WITH f, similarity, collect(DISTINCT d)[0] AS d
-    RETURN f.fact_id AS fact_id, f.summary AS fact_summary, f, d, similarity
-"""
-
-PERSON_FACT_VECTOR_QUERY = """
-    MATCH (p:Person {id: $user_id})-[:HAS_FACT]-(f:CanonicalFact)
-    WHERE f.status = 'current' AND f.embedding IS NOT NULL
-    WITH f, f.embedding AS fact_embedding, $query_embedding AS query_embedding
-    WITH f, gds.similarity.cosine(fact_embedding, query_embedding) AS similarity
+    WITH f,
+         gds.similarity.cosine(fact_embedding, query_embedding) AS similarity,
+         coalesce(f.last_seen_at, f.first_seen_at) AS recency_ts
+    WITH f, similarity,
+         CASE
+             WHEN recency_ts IS NULL THEN 0.0
+             ELSE exp(-1.0 * duration.inDays(datetime(recency_ts), datetime()).days / $recency_decay_days) * $recency_boost_max
+         END AS recency_weight
+    WITH f, similarity + recency_weight AS similarity
     ORDER BY similarity DESC
     LIMIT 3
     OPTIONAL MATCH (f)<-[:SUPPORTS]-(claim:Claim)<-[:HAS_CLAIM]-(d:Document)
@@ -527,6 +526,10 @@ def _derive_evidence_refs(retrieval_trace: Optional[Dict[str, Any]] = None, limi
             ref = f"fact:{item['fact_id']}"
         elif item.get("chunk_id"):
             ref = f"chunk:{item['chunk_id']}"
+        elif (item.get("document") or {}).get("doc_id"):
+            ref = f"doc:{(item.get('document') or {}).get('doc_id')}"
+        elif (item.get("related_node") or {}).get("id"):
+            ref = f"node:{(item.get('related_node') or {}).get('id')}"
         if ref and ref not in refs:
             refs.append(ref)
         if len(refs) >= limit:
@@ -1078,8 +1081,10 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
             global_results = [
                 _prepare_chunk_result(row, focus_terms=focus_terms, reports_to_lookup=reports_to_lookup)
                 for row in session.run(
-                GRAPH_VECTOR_QUERY,
-                query_embedding=query_embedding.tolist(),
+                    GRAPH_VECTOR_QUERY,
+                    query_embedding=query_embedding.tolist(),
+                    recency_decay_days=RECENCY_DECAY_DAYS,
+                    recency_boost_max=RECENCY_BOOST_MAX,
                 ).data()
                 if row.get("chunk_id") or row.get("chunk_summary")
             ]
@@ -1091,6 +1096,8 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                         PERSON_GRAPH_VECTOR_QUERY,
                         user_id=user_id,
                         query_embedding=query_embedding.tolist(),
+                        recency_decay_days=RECENCY_DECAY_DAYS,
+                        recency_boost_max=RECENCY_BOOST_MAX,
                     ).data()
                     if row.get("chunk_id") or row.get("chunk_summary")
                 ]
@@ -1106,6 +1113,8 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                     for row in session.run(
                         FACT_VECTOR_QUERY,
                         query_embedding=query_embedding.tolist(),
+                        recency_decay_days=RECENCY_DECAY_DAYS,
+                        recency_boost_max=RECENCY_BOOST_MAX,
                 ).data()
                 if row.get("fact_id")
             ]
@@ -1124,6 +1133,8 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                         PERSON_FACT_VECTOR_QUERY,
                         user_id=user_id,
                         query_embedding=query_embedding.tolist(),
+                        recency_decay_days=RECENCY_DECAY_DAYS,
+                        recency_boost_max=RECENCY_BOOST_MAX,
                     ).data()
                     if row.get("fact_id")
                 ]
@@ -1190,6 +1201,7 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                     "relationship": "CANONICAL_FACT",
                     "retrieval_path": path_summary["path"],
                     "hop_count": path_summary["hop_count"],
+                    "chunk_id": None,
                     "document": {
                         "doc_id": supporting_document.get("doc_id"),
                         "subject": supporting_document.get("subject"),
@@ -1205,6 +1217,8 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                         "display_name": canonical_key or fact_summary,
                         "id": fact_id,
                     },
+                    "related_node_id": fact_id,
+                    "direction": "fact",
                     "fact": {
                         "claim_type": fact.get("claim_type"),
                         "status": fact.get("status"),
@@ -1294,7 +1308,12 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                     "label": related_label,
                     "display_name": related_name,
                     "id": related_node.get("id") or related_node.get("_element_id"),
-                } if related_node else {},
+                }
+                if related_node
+                else {},
+                "related_node_id": (related_node.get("id") or related_node.get("_element_id")) if related_node else None,
+                "direction": "OUT",
+                "fact": None,
             }
             evidence.append(evidence_item)
 
@@ -1325,6 +1344,7 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
             "max_hop_count": max((item["hop_count"] for item in evidence), default=0),
             "retrieval_path": evidence[0]["retrieval_path"] if evidence else _build_path_summary(personalized_lookup, None)["path"],
             "evidence": evidence,
+            "no_evidence": not evidence,
         }
         return {"documents": documents, "trace": trace}
     except Exception as exc:
@@ -1499,6 +1519,14 @@ def _document_exists(session, doc_id: str) -> bool:
     return bool(rows)
 
 
+def _chunk_exists(session, chunk_id: str) -> bool:
+    rows = session.run(
+        "MATCH (c:Chunk {chunk_id: $chunk_id}) RETURN c.chunk_id AS id LIMIT 1",
+        chunk_id=chunk_id,
+    ).data()
+    return bool(rows)
+
+
 def _smart_summarize(llm, content: str) -> str:
     """Skip expensive LLM summarization for short content (e.g. chat messages).
 
@@ -1546,6 +1574,9 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
                     d.summary = $summary,
                     d.timestamp = $timestamp,
                     d.source = $source,
+                    d.source_normalized = $source_normalized,
+                    d.source_version = $source_version,
+                    d.schema_version = $schema_version,
                     d.conversation_type = $conversation_type,
                     d.conversation_id = $conversation_id,
                     d.group_id = $group_id,
@@ -1568,6 +1599,9 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
                 summary=document_summary,
                 timestamp=data.get("timestamp"),
                 source=data.get("source"),
+                source_normalized=data.get("source_normalized") or data.get("source"),
+                source_version=data.get("source_version") or 1,
+                schema_version=data.get("schema_version") or 1,
                 conversation_type=data.get("conversation_type"),
                 conversation_id=data.get("conversation_id"),
                 group_id=data.get("group_id"),
@@ -1585,36 +1619,49 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
             if word_count <= _SHORT_CONTENT_WORD_LIMIT:
                 # Short content: store as a single chunk, no splitting needed
                 chunk_embedding = utils.generate_embedding(document_summary)
-                session.run(
-                    """
-                    MERGE (c:Chunk {chunk_id: $chunk_id})
-                    SET c.content = $content, c.embedding = $embedding, c.summary = $summary
-                    MERGE (d:Document {doc_id: $doc_id})
-                    MERGE (c)-[:PART_OF]->(d)
-                    """,
-                    chunk_id=f"{data['doc_id']}-chunk-0",
-                    content=content,
-                    embedding=chunk_embedding,
-                    summary=document_summary,
-                    doc_id=data["doc_id"],
-                )
+                chunk_id = f"{data['doc_id']}-chunk-0"
+                if not _chunk_exists(session, chunk_id):
+                    session.run(
+                        """
+                        MERGE (c:Chunk {chunk_id: $chunk_id})
+                        SET c.content = $content,
+                            c.embedding = $embedding,
+                            c.summary = $summary,
+                            c.timestamp = $timestamp
+                        MERGE (d:Document {doc_id: $doc_id})
+                        MERGE (c)-[:PART_OF]->(d)
+                        """,
+                        chunk_id=chunk_id,
+                        content=content,
+                        embedding=chunk_embedding,
+                        summary=document_summary,
+                        timestamp=data.get("timestamp"),
+                        doc_id=data["doc_id"],
+                    )
             else:
                 # Long content: full chunking pipeline with LLM summaries
                 chunks = utils.chunk_document(content, max_chunk_words=250, overlap_sentences=2)
                 for i, chunk in enumerate(chunks):
                     chunk_summary = _smart_summarize(llm, chunk)
                     chunk_embedding = utils.generate_embedding(chunk_summary)
+                    chunk_id = f"{data['doc_id']}-chunk-{i}"
+                    if _chunk_exists(session, chunk_id):
+                        continue
                     session.run(
                         """
                         MERGE (c:Chunk {chunk_id: $chunk_id})
-                        SET c.content = $content, c.embedding = $embedding, c.summary = $summary
+                        SET c.content = $content,
+                            c.embedding = $embedding,
+                            c.summary = $summary,
+                            c.timestamp = $timestamp
                         MERGE (d:Document {doc_id: $doc_id})
                         MERGE (c)-[:PART_OF]->(d)
                         """,
-                        chunk_id=f"{data['doc_id']}-chunk-{i}",
+                        chunk_id=chunk_id,
                         content=chunk,
                         embedding=chunk_embedding,
                         summary=chunk_summary,
+                        timestamp=data.get("timestamp"),
                         doc_id=data["doc_id"],
                     )
 

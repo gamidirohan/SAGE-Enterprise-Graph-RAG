@@ -210,6 +210,34 @@ def test_chat_endpoint_builds_fallback_answer_payload_with_evidence_refs(monkeyp
     assert result["answer_payload"]["evidence_refs"] == ["fact:fact-1", "chunk:chunk-1"]
 
 
+def test_chat_endpoint_agentic_mode_routes_to_orchestrator(monkeypatch):
+    monkeypatch.setattr(
+        backend.agentic,
+        "run_agentic_query",
+        lambda _message, user_id=None, history=None: {
+            "answer": "agentic answer",
+            "answer_payload": {
+                "schema_version": 1,
+                "mode": "short",
+                "reason_code": "direct_lookup",
+                "summary": "agentic answer",
+                "bullets": [],
+                "explanation": "agentic",
+                "evidence_refs": ["chunk:chunk-1"],
+            },
+            "thinking": ["Planner selected graph retrieval."],
+            "trace": {"agentic": {"enabled": True}, "evidence": [{"chunk_id": "chunk-1"}]},
+        },
+    )
+
+    request = backend.ChatRequest(message="hi", history=[], agentic_mode=True, user_id="u1")
+    result = asyncio.run(backend.chat_endpoint(request))
+
+    assert result["answer"] == "agentic answer"
+    assert result["trace"]["agentic"]["enabled"] is True
+    assert result["thinking"] == ["Planner selected graph retrieval."]
+
+
 def test_health_check_endpoint():
     result = asyncio.run(backend.health_check())
     assert result == {"status": "ok"}
@@ -376,8 +404,11 @@ def test_process_document_triggers_saia_for_message_attachments(monkeypatch):
     )
 
     assert result["success"] is True
-    assert result["doc_id"] == "message-attachment-m1"
-    assert captured["doc_id"] == "message-attachment-m1"
+    assert result["doc_id"] == "message-attachment-m1-doc-123"
+    assert result["saia_status"] == "succeeded"
+    assert result["saia_last_error"] is None
+    assert result["warnings"] == []
+    assert captured["doc_id"] == "message-attachment-m1-doc-123"
     assert captured["linked_message_id"] == "m1"
     assert captured["conversation_id"] == "direct:u1:u2"
     assert captured["receiver_ids"] == ["u2"]

@@ -383,6 +383,69 @@ def test_extract_claims_from_text_reports_to_prefers_exact_user_person_match_ove
     assert claim["resolution_status"] == "resolved"
 
 
+def test_extract_claims_from_text_supports_manager_assertion_paraphrase():
+    context = saia.GroundingContext(
+        source_kind="chat_message",
+        source_doc_id="chat-msg-manager-1",
+        source_message_id="manager-1",
+        linked_message_id=None,
+        sender_id="u1",
+        receiver_ids=["u2"],
+        conversation_id="direct:u1:u2",
+        conversation_type="direct",
+        group_id=None,
+        sent_at="2026-04-28T12:52:14.996Z",
+    )
+
+    claims = saia.extract_claims_from_text("From now on I'm your only manager Bijade.", context)
+
+    reports_to_claims = [claim for claim in claims if claim["claim_type"] == "REPORTS_TO"]
+    assert len(reports_to_claims) == 1
+    claim = reports_to_claims[0]
+    assert claim["subject_entity_id"] == "u2"
+    assert claim["object_entity_id"] == "u1"
+    assert claim["resolution_status"] == "resolved"
+
+
+def test_extract_claims_from_text_merges_llm_assisted_claims(monkeypatch):
+    context = saia.GroundingContext(
+        source_kind="chat_message",
+        source_doc_id="chat-msg-manager-2",
+        source_message_id="manager-2",
+        linked_message_id=None,
+        sender_id="u1",
+        receiver_ids=["u2"],
+        conversation_id="direct:u1:u2",
+        conversation_type="direct",
+        group_id=None,
+        sent_at="2026-04-28T12:52:14.996Z",
+    )
+
+    monkeypatch.setattr(saia, "_saia_llm_assist_enabled", lambda: True)
+    monkeypatch.setattr(
+        saia,
+        "_extract_llm_candidate_claims",
+        lambda _text, _context, session=None: [
+            {
+                "claim_type": "REPORTS_TO",
+                "predicate": "REPORTS_TO",
+                "subject_key": "u2",
+                "subject_entity_id": "u2",
+                "object_key": "u1",
+                "object_entity_id": "u1",
+                "value_text": None,
+                "temporal_start": None,
+                "normalized_text": "u2 reports to u1",
+                "source_span_text": "Bijade now comes under me.",
+            }
+        ],
+    )
+
+    claims = saia.extract_claims_from_text("Bijade now comes under me.", context)
+
+    assert any(claim["claim_type"] == "REPORTS_TO" for claim in claims)
+
+
 def test_process_chat_message_promotes_direct_commitment_to_canonical_fact(monkeypatch):
     session = _Session()
     driver = _patch_saia_runtime(monkeypatch, session)
@@ -861,7 +924,7 @@ def test_collect_message_insight_returns_preview_claims_for_skipped_message(monk
 
     insight = saia.collect_message_insight(_Session(handler=handler), "m-preview")
 
-    assert insight["saia_status"] == "skipped"
+    assert insight["saia_status"] == "not_processed"
     assert insight["claims"] == []
     assert len(insight["preview_claims"]) == 1
     preview_claim = insight["preview_claims"][0]
@@ -874,6 +937,29 @@ def test_collect_message_insight_returns_preview_claims_for_skipped_message(monk
     assert preview_claim["grounding"]["references"][0]["display_name"] == "Alice"
     assert preview_claim["grounding"]["references"][1]["display_name"] == "Bob"
     assert insight["summary"]["preview_claim_count"] == 1
+
+
+def test_process_chat_message_persists_not_processed_for_skipped_runs(monkeypatch):
+    session = _Session()
+    _patch_saia_runtime(monkeypatch, session)
+
+    result = saia.process_chat_message(
+        message_id="m-no-claims",
+        sender_id="u1",
+        receiver_ids=["u2"],
+        conversation_id="direct:u1:u2",
+        conversation_type="direct",
+        group_id=None,
+        sent_at="2026-04-12T08:29:06.790Z",
+        content="hello there",
+    )
+
+    assert result["status"] == "skipped"
+    run_writes = [call for call in session.calls if "MERGE (r:SAIARun {run_id: $run_id})" in call["query"]]
+    source_writes = [call for call in session.calls if "SET m.saia_status = $status" in call["query"]]
+
+    assert run_writes[-1]["params"]["status"] == "not_processed"
+    assert source_writes[-1]["params"]["status"] == "not_processed"
 
 
 def test_collect_message_insight_returns_preview_claims_when_saia_is_disabled(monkeypatch):

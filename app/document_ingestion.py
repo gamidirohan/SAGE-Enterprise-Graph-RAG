@@ -72,13 +72,13 @@ def list_mapping_files(directory: Union[str, Path]) -> List[Path]:
 def extract_document_text(file_path: Union[str, Path]) -> str:
     path = resolve_path(file_path)
     suffix = path.suffix.lower()
+    if suffix not in SUPPORTED_DOCUMENT_EXTENSIONS:
+        raise ValueError(f"Unsupported document extension: {path.suffix}")
     if suffix == ".pdf":
         return utils.extract_text_from_pdf(str(path))
     if suffix == ".docx":
         return utils.extract_text_from_docx(str(path))
-    if suffix == ".txt":
-        return path.read_text(encoding="utf-8")
-    raise ValueError(f"Unsupported document extension: {path.suffix}")
+    return path.read_text(encoding="utf-8")
 
 
 def load_document_identity(file_path: Union[str, Path]) -> Dict[str, Any]:
@@ -103,7 +103,15 @@ def extract_id_mappings(file_path: Union[str, Path]) -> List[Dict[str, str]]:
                 match = MAPPING_FILE_PATTERN.match(line)
                 if match:
                     emp_id, name, role = match.groups()
-                    mappings.append({"id": emp_id, "name": name, "role": role})
+                    normalized_id = emp_id.strip().upper()
+                    normalized_name = name.strip().title()
+                    normalized_role = role.strip().lower()
+                    if not (normalized_id and normalized_name and normalized_role):
+                        logger.warning("Skipping invalid mapping row in %s: %s", path, line)
+                        continue
+                    mappings.append({"id": normalized_id, "name": normalized_name, "role": normalized_role})
+                else:
+                    logger.warning("Rejecting malformed mapping row in %s: %s", path, line)
     except Exception as exc:
         logger.error("Error reading ID mappings from %s: %s", path, exc)
     return mappings
@@ -120,7 +128,9 @@ def upsert_id_mappings_to_neo4j(mappings: List[Dict[str, str]]) -> bool:
                 session.run(
                     """
                     MERGE (p:Person {id: $id})
-                    SET p.name = $name, p.role = $role
+                    SET p.name = coalesce(p.name, $name),
+                        p.role = coalesce(p.role, $role),
+                        p.updated_at = datetime()
                     """,
                     id=row["id"],
                     name=row["name"],

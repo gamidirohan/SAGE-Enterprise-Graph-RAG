@@ -14,9 +14,11 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
+    import app.agentic as agentic
     import app.services as services
     import app.utils as utils
 except ImportError:
+    import agentic
     import services
     import utils
 
@@ -149,8 +151,12 @@ def process_pending_message():
     with st.spinner("Processing..."):
         try:
             user_input = st.session_state.get("temp_input", "")
-            graph_results = query_graph(user_input)
-            groq_response = generate_groq_response(user_input, graph_results)
+            if st.session_state.get("agentic_mode"):
+                agentic_result = agentic.run_agentic_query(user_input)
+                groq_response = agentic_result.get("answer") or ""
+            else:
+                graph_results = query_graph(user_input)
+                groq_response = generate_groq_response(user_input, graph_results)
 
             think_parts = re.findall(r"<think>(.*?)</think>", groq_response, re.DOTALL)
             answer = re.sub(r"<think>.*?</think>", "", groq_response, flags=re.DOTALL).strip()
@@ -177,6 +183,12 @@ if "processing" not in st.session_state:
 
 render_chat_history()
 render_graph_debug()
+st.checkbox(
+    "Agentic mode",
+    value=st.session_state.get("agentic_mode", False),
+    key="agentic_mode",
+    help="Use the planner / retriever / reasoner / critic scaffold.",
+)
 
 col1, col2 = st.columns([4, 1])
 with col1:

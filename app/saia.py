@@ -16,6 +16,10 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
+
 try:
     import app.utils as utils
 except ImportError:  # pragma: no cover - import fallback for direct execution
@@ -32,6 +36,7 @@ CONTEXT_WINDOW_MESSAGES = int(os.getenv("SAIA_CONTEXT_WINDOW_MESSAGES", "3"))
 MIN_GRAPH_WORTHY_CONFIDENCE = float(os.getenv("SAIA_MIN_GRAPH_WORTHY_CONFIDENCE", "0.70"))
 MIN_CANONICAL_CONFIDENCE = float(os.getenv("SAIA_MIN_CANONICAL_CONFIDENCE", "0.80"))
 ALLOW_AI_AUTHORED_EVIDENCE = os.getenv("SAIA_ALLOW_AI_AUTHORED_EVIDENCE", "false").lower() in {"1", "true", "yes"}
+SAIA_LLM_ASSISTED = os.getenv("SAIA_LLM_ASSISTED", "true").lower() in {"1", "true", "yes"}
 
 FIRST_PERSON_TOKENS = {"i", "me", "my", "mine", "myself"}
 SECOND_PERSON_TOKENS = {"you", "your", "yours", "yourself", "yourselves"}
@@ -78,6 +83,13 @@ REPORTS_TO_PATTERN = re.compile(
     r"\b(?P<subject>[A-Z][A-Za-z0-9_\-]*(?:\s+[A-Z][A-Za-z0-9_\-]*)*|EMP\d{3})\s+(?:now\s+)?reports\s+to\s+(?P<object>[A-Z][A-Za-z0-9_\-]*(?:\s+[A-Z][A-Za-z0-9_\-]*)*|EMP\d{3})\b",
     re.IGNORECASE,
 )
+MANAGER_ASSERTION_PATTERN = re.compile(
+    rf"\b(?:(?:from\s+now\s+on)\s+)?(?P<manager>I|you|{ENTITY_PHRASE_PATTERN}|EMP\d{{3}})\s*"
+    r"(?:am|\'m|is|are)\s+(?:your|the|our|my)?\s*(?:only\s+|sole\s+|direct\s+)?"
+    r"(?:manager|boss|supervisor|lead)\b(?:\s+(?P<employee>you|me|"
+    rf"{ENTITY_PHRASE_PATTERN}|EMP\d{{3}}))?",
+    re.IGNORECASE,
+)
 APPROVAL_PATTERN = re.compile(
     rf"\b(?P<subject>{OPTIONAL_SCOPED_ENTITY_PATTERN})\s+(?P<verb>approved|approves|authorized|authorised)\s+(?P<object>[^.?!]+)",
     re.IGNORECASE,
@@ -113,6 +125,48 @@ FIRST_PERSON_COMMITMENT_PATTERN = re.compile(
 NAMED_COMMITMENT_PATTERN = re.compile(
     rf"\b(?P<subject>[A-Z][A-Za-z0-9_\-]*(?:\s+[A-Z][A-Za-z0-9_\-]*)*|EMP\d{{3}})\s+(?:will|should|must)(?:\s+be)?\s+(?P<verb>{COMMITMENT_VERB_PATTERN})\s+(?P<body>[^?.!]+)",
     re.IGNORECASE,
+)
+
+
+class _SAIALLMCandidate(BaseModel):
+    relation: str
+    source_span_text: str
+    subject: Optional[str] = None
+    object: Optional[str] = None
+    value_text: Optional[str] = None
+    temporal_reference: Optional[str] = None
+    confidence: float = Field(default=0.0)
+
+
+class _SAIALLMResponse(BaseModel):
+    claims: List[_SAIALLMCandidate] = Field(default_factory=list)
+
+
+_SAIA_LLM_PROMPT = ChatPromptTemplate.from_template(
+    """
+    Extract enterprise graph claims from a single message. Return JSON only.
+
+    Supported relations:
+    - reports_to: subject reports to object
+    - manages: subject manages object
+    - approval: subject is approved by optional object
+    - status: subject has status value_text
+    - assignment_state: subject is assigned/unassigned to object with value_text active/inactive
+    - meeting: value_text describes the meeting event
+    - task_commitment: subject commits to value_text for optional object
+    - request: subject requests value_text from optional object
+
+    Prefer supported relations only. If nothing graph-worthy is present, return {{"claims":[]}}.
+    Resolve pronouns using this context:
+    - sender_id: {sender_id}
+    - receiver_ids: {receiver_ids}
+    - conversation_type: {conversation_type}
+    - group_id: {group_id}
+    - sent_at: {sent_at}
+
+    Message:
+    {text}
+    """
 )
 
 
@@ -364,6 +418,346 @@ def process_text(content: str, context: GroundingContext) -> Dict[str, Any]:
         driver.close()
 
 
+def _build_reports_to_claim(
+    context: GroundingContext,
+    *,
+    source_span_text: str,
+    report_subject_text: str,
+    manager_text: str,
+    session: Any = None,
+    extraction_confidence: float = 0.9,
+    temporal_text: Optional[str] = None,
+) -> Dict[str, Any]:
+    subject = _resolve_reference(report_subject_text, context, session=session, allow_pronouns=True)
+    obj = _resolve_reference(manager_text, context, session=session, allow_pronouns=True)
+    normalized_text = (
+        f"{_resolution_label(subject, fallback=report_subject_text)} "
+        f"reports to {_resolution_label(obj, fallback=manager_text)}"
+    )
+    temporal = normalize_temporal_reference(temporal_text or source_span_text, context.sent_at, context.timezone)
+    canonical_confidence = 0.95 if subject.entity_id and obj.entity_id else 0.62
+    return _base_claim(
+        context,
+        source_span_text.strip(),
+        claim_type="REPORTS_TO",
+        predicate="REPORTS_TO",
+        subject_resolution=subject,
+        object_resolution=obj,
+        value_text=None,
+        graph_worthy=True,
+        extraction_confidence=extraction_confidence,
+        canonical_confidence=canonical_confidence,
+        normalized_text=normalized_text,
+        temporal=temporal,
+    )
+
+
+def _extract_manager_claims(sentence: str, context: GroundingContext, session: Any = None) -> List[Dict[str, Any]]:
+    match = MANAGER_ASSERTION_PATTERN.search(sentence)
+    if not match:
+        return []
+
+    manager_text = _normalize_whitespace(match.group("manager"))
+    employee_text = _normalize_whitespace(match.group("employee") or "")
+    manager_lower = manager_text.lower()
+    lowered_sentence = sentence.lower()
+
+    if "your" in lowered_sentence and manager_lower in FIRST_PERSON_TOKENS:
+        employee_text = "you"
+    elif "my" in lowered_sentence and manager_lower in SECOND_PERSON_TOKENS:
+        employee_text = "I"
+    elif not employee_text:
+        if manager_lower in FIRST_PERSON_TOKENS:
+            employee_text = "you"
+        elif manager_lower in SECOND_PERSON_TOKENS:
+            employee_text = "I"
+        else:
+            return []
+
+    return [
+        _build_reports_to_claim(
+            context,
+            source_span_text=match.group(0),
+            report_subject_text=employee_text,
+            manager_text=manager_text,
+            session=session,
+            extraction_confidence=0.94,
+            temporal_text=sentence,
+        )
+    ]
+
+
+def _saia_llm_assist_enabled() -> bool:
+    return SAIA_LLM_ASSISTED and bool(utils.GROQ_API_KEY)
+
+
+def _create_saia_llm_client():
+    if not _saia_llm_assist_enabled():
+        return None
+    try:
+        from langchain_groq import ChatGroq
+
+        return ChatGroq(
+            model_name=utils.GROQ_MODEL,
+            temperature=0.0,
+            groq_api_key=utils.GROQ_API_KEY,
+            model_kwargs={"response_format": {"type": "json_object"}},
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Failed to initialize SAIA LLM assistant: %s", exc)
+        return None
+
+
+def _build_claim_from_llm_candidate(candidate: _SAIALLMCandidate, context: GroundingContext, session: Any = None) -> Optional[Dict[str, Any]]:
+    relation = (candidate.relation or "").strip().lower()
+    span = _normalize_whitespace(candidate.source_span_text or "")
+    if not relation or not span:
+        return None
+
+    confidence = max(0.0, min(float(candidate.confidence or 0.0), 1.0)) or 0.78
+    temporal_text = " ".join(part for part in [candidate.temporal_reference, span] if part).strip()
+
+    if relation == "reports_to":
+        if not candidate.subject or not candidate.object:
+            return None
+        return _build_reports_to_claim(
+            context,
+            source_span_text=span,
+            report_subject_text=candidate.subject,
+            manager_text=candidate.object,
+            session=session,
+            extraction_confidence=confidence,
+            temporal_text=temporal_text,
+        )
+
+    if relation == "manages":
+        manager_text = candidate.subject or "I"
+        employee_text = candidate.object or "you"
+        return _build_reports_to_claim(
+            context,
+            source_span_text=span,
+            report_subject_text=employee_text,
+            manager_text=manager_text,
+            session=session,
+            extraction_confidence=confidence,
+            temporal_text=temporal_text,
+        )
+
+    if relation == "approval":
+        target_text = _normalize_whitespace(candidate.subject or candidate.object or candidate.value_text or "")
+        if not target_text:
+            return None
+        approver_text = _normalize_whitespace(candidate.object or "")
+        target = _resolve_reference(target_text, context, session=session, allow_pronouns=True)
+        approver = _resolve_reference(approver_text, context, session=session, allow_pronouns=True) if approver_text else None
+        target_key = target.key or _slugify(target_text)
+        claim = _base_claim(
+            context,
+            span,
+            claim_type="APPROVAL_STATE",
+            predicate="APPROVED",
+            subject_resolution=target,
+            object_resolution=approver,
+            value_text="approved",
+            graph_worthy=True,
+            extraction_confidence=confidence,
+            canonical_confidence=0.86 if target.key else 0.55,
+            normalized_text=(
+                f"{_resolution_label(target, fallback=target_key)} is approved"
+                + (
+                    f" by {_resolution_label(approver, fallback=approver_text)}"
+                    if approver is not None and approver.key
+                    else ""
+                )
+            ),
+            temporal=normalize_temporal_reference(temporal_text or span, context.sent_at, context.timezone),
+        )
+        claim["payload_json"] = json.dumps(
+            {
+                "approval_target": target_key,
+                "approval_state": "approved",
+                "approver_id": approver.entity_id if approver else None,
+                "approver_key": approver.key if approver else None,
+            },
+            sort_keys=True,
+        )
+        return claim
+
+    if relation == "status":
+        subject_text = _normalize_whitespace(candidate.subject or "")
+        value_text = _normalize_whitespace(candidate.value_text or "")
+        if not subject_text or not value_text:
+            return None
+        subject = _resolve_reference(subject_text, context, session=session, allow_pronouns=True)
+        return _base_claim(
+            context,
+            span,
+            claim_type="STATUS_UPDATE",
+            predicate="STATUS",
+            subject_resolution=subject,
+            object_resolution=None,
+            value_text=value_text.lower(),
+            graph_worthy=True,
+            extraction_confidence=confidence,
+            canonical_confidence=0.82 if subject.key else 0.6,
+            normalized_text=f"{_resolution_label(subject, fallback=subject_text)} is {value_text.lower()}",
+            temporal=normalize_temporal_reference(temporal_text or span, context.sent_at, context.timezone),
+        )
+
+    if relation == "assignment_state":
+        subject_text = _normalize_whitespace(candidate.subject or "")
+        object_text = _normalize_whitespace(candidate.object or "")
+        state = _normalize_whitespace(candidate.value_text or "active").lower()
+        if not subject_text or not object_text:
+            return None
+        subject = _resolve_reference(subject_text, context, session=session, allow_pronouns=True)
+        target = _resolve_reference(object_text, context, session=session, allow_pronouns=True)
+        normalized_target = target.key or _slugify(object_text)
+        claim = _base_claim(
+            context,
+            span,
+            claim_type="ASSIGNMENT_STATE",
+            predicate="ASSIGNED_TO",
+            subject_resolution=subject,
+            object_resolution=target,
+            value_text=state,
+            graph_worthy=True,
+            extraction_confidence=confidence,
+            canonical_confidence=0.86 if subject.key and target.key else 0.6,
+            normalized_text=(
+                f"{_resolution_label(subject, fallback=subject_text)} "
+                f"is {'no longer assigned to' if state == 'inactive' else 'assigned to'} "
+                f"{_resolution_label(target, fallback=normalized_target)}"
+            ),
+            temporal=normalize_temporal_reference(temporal_text or span, context.sent_at, context.timezone),
+        )
+        claim["payload_json"] = json.dumps(
+            {"assignment_state": state, "assignment_target": normalized_target},
+            sort_keys=True,
+        )
+        return claim
+
+    if relation == "meeting":
+        event_phrase = _canonicalize_event_phrase(candidate.value_text or span)
+        subject = _group_or_scope_subject(context, session=session)
+        claim = _base_claim(
+            context,
+            span,
+            claim_type="MEETING_EVENT",
+            predicate="SCHEDULED_FOR",
+            subject_resolution=subject,
+            object_resolution=None,
+            value_text=event_phrase,
+            graph_worthy=True,
+            extraction_confidence=confidence,
+            canonical_confidence=0.84 if temporal_text else 0.6,
+            normalized_text=event_phrase,
+            temporal=normalize_temporal_reference(temporal_text or span, context.sent_at, context.timezone),
+        )
+        claim["payload_json"] = json.dumps({"event_signature": _slugify(event_phrase)}, sort_keys=True)
+        return claim
+
+    if relation == "task_commitment":
+        subject = _resolve_reference(candidate.subject or "I", context, session=session, allow_pronouns=True)
+        recipient_text = _normalize_whitespace(candidate.object or "")
+        recipient = (
+            _resolve_reference(recipient_text, context, session=session, allow_pronouns=True)
+            if recipient_text
+            else Resolution(raw="", key=None, entity_id=None, entity_type=None, status="resolved", display_name=None)
+        )
+        value_text = _normalize_whitespace(candidate.value_text or span)
+        task_signature = _slugify(value_text or "task")
+        relation_text = _default_commitment_recipient_relation(value_text.split(" ", 1)[0] if value_text else "deliver")
+        normalized_text = f"{_resolution_label(subject, fallback=context.sender_id)} will {value_text}"
+        if recipient.key:
+            normalized_text += f" {relation_text} {_resolution_label(recipient, fallback=recipient_text)}"
+        temporal = normalize_temporal_reference(temporal_text or span, context.sent_at, context.timezone)
+        if temporal.get("temporal_start"):
+            normalized_text += f" on {temporal['temporal_start']}"
+        claim = _base_claim(
+            context,
+            span,
+            claim_type="TASK_ASSIGNMENT",
+            predicate="TASK_COMMITMENT",
+            subject_resolution=subject,
+            object_resolution=recipient,
+            value_text=value_text,
+            graph_worthy=True,
+            extraction_confidence=confidence,
+            canonical_confidence=0.88 if subject.entity_id and temporal.get("temporal_start") else 0.72,
+            normalized_text=normalized_text,
+            temporal=temporal,
+        )
+        claim["payload_json"] = json.dumps(
+            {
+                "task_signature": task_signature,
+                "verb": _normalize_commitment_verb(value_text.split(" ", 1)[0] if value_text else "deliver"),
+                "item": value_text,
+                "recipient_id": recipient.entity_id,
+                "recipient_key": recipient.key,
+                "recipient_relation": relation_text,
+                "context_fragments": [],
+            },
+            sort_keys=True,
+        )
+        return claim
+
+    if relation == "request":
+        action_text = _normalize_whitespace(candidate.value_text or span)
+        requester = _resolve_reference(candidate.subject or "I", context, session=session, allow_pronouns=True)
+        recipient_text = _normalize_whitespace(candidate.object or "you")
+        recipient = _resolve_reference(recipient_text, context, session=session, allow_pronouns=True)
+        claim = _base_claim(
+            context,
+            span,
+            claim_type="REQUEST",
+            predicate="REQUEST_ACTION",
+            subject_resolution=requester,
+            object_resolution=recipient,
+            value_text=action_text,
+            graph_worthy=False,
+            extraction_confidence=confidence,
+            canonical_confidence=0.0,
+            normalized_text=_normalize_request_text(context, recipient, action_text),
+            temporal=normalize_temporal_reference(temporal_text or span, context.sent_at, context.timezone),
+        )
+        claim["promotion_status"] = "skipped_noncanonical"
+        return claim
+
+    return None
+
+
+def _extract_llm_candidate_claims(text: str, context: GroundingContext, session: Any = None) -> List[Dict[str, Any]]:
+    llm = _create_saia_llm_client()
+    if llm is None:
+        return []
+
+    try:
+        parser = JsonOutputParser(pydantic_object=_SAIALLMResponse)
+        chain = _SAIA_LLM_PROMPT | llm | parser
+        payload = chain.invoke(
+            {
+                "text": text,
+                "sender_id": context.sender_id,
+                "receiver_ids": json.dumps(context.receiver_ids),
+                "conversation_type": context.conversation_type or "unknown",
+                "group_id": context.group_id or "none",
+                "sent_at": context.sent_at,
+            }
+        )
+        response = _SAIALLMResponse.model_validate(payload)
+    except Exception as exc:  # pragma: no cover - model/runtime behavior
+        logger.warning("SAIA LLM extraction failed for %s: %s", context.source_doc_id, exc)
+        return []
+
+    claims: List[Dict[str, Any]] = []
+    for candidate in response.claims:
+        claim = _build_claim_from_llm_candidate(candidate, context, session=session)
+        if claim is not None:
+            claims.append(claim)
+    return claims
+
+
 def extract_claims_from_text(text: str, context: GroundingContext, session: Any = None) -> List[Dict[str, Any]]:
     sentences = _split_claim_spans(text)
     claims: List[Dict[str, Any]] = []
@@ -371,6 +765,7 @@ def extract_claims_from_text(text: str, context: GroundingContext, session: Any 
     for sentence in sentences:
         for extractor in (
             _extract_request_claims,
+            _extract_manager_claims,
             _extract_reports_to_claims,
             _extract_approval_claims,
             _extract_status_claims,
@@ -384,6 +779,13 @@ def extract_claims_from_text(text: str, context: GroundingContext, session: Any 
                     continue
                 seen.add(dedupe_key)
                 claims.append(claim)
+    if _saia_llm_assist_enabled():
+        for claim in _extract_llm_candidate_claims(text, context, session=session):
+            dedupe_key = _claim_dedupe_key(claim)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            claims.append(claim)
     return claims
 
 
@@ -1275,6 +1677,30 @@ def _facts_match(fact: Dict[str, Any], claim: Dict[str, Any]) -> bool:
     return all((fact.get(key) or "") == (claim.get(key) or "") for key in comparable_keys)
 
 
+def _normalize_status_for_insight(status: Optional[str], *, default: str) -> str:
+    normalized = (status or "").strip().lower()
+    if not normalized:
+        return default
+    return {
+        "completed": "succeeded",
+        "succeeded": "succeeded",
+        "failed": "failed",
+        "disabled": "disabled",
+        "skipped": "not_processed",
+        "not_processed": "not_processed",
+    }.get(normalized, normalized)
+
+
+def _humanize_reason(reason: Optional[str]) -> Optional[str]:
+    normalized = (reason or "").strip()
+    if not normalized:
+        return None
+    return {
+        "no_claims": "No claims were extracted for this message.",
+        "source_ineligible": "This message was not eligible for SAIA processing.",
+    }.get(normalized, normalized.replace("_", " "))
+
+
 def collect_message_insight(session: Any, message_id: str) -> Dict[str, Any]:
     chat_doc_id = f"chat-msg-{message_id}"
     message_rows = session.run(
@@ -1303,6 +1729,11 @@ def collect_message_insight(session: Any, message_id: str) -> Dict[str, Any]:
         chat_doc_id=chat_doc_id,
     ).data()
     source_documents = [_serialize_node(row.get("d")) for row in document_rows if row.get("d") is not None]
+    for document in source_documents:
+        document["saia_status"] = _normalize_status_for_insight(
+            document.get("saia_status"),
+            default="disabled" if not is_enabled() else "not_processed",
+        )
 
     claim_rows = session.run(
         """
@@ -1414,11 +1845,22 @@ def collect_message_insight(session: Any, message_id: str) -> Dict[str, Any]:
         if not run:
             continue
         run["source_doc_id"] = row.get("source_doc_id")
+        # Provide a consistent run_id and grounding-friendly status surface.
+        if run.get("run_id"):
+            run["id"] = run["run_id"]
+        run["status"] = _normalize_status_for_insight(run.get("status"), default="not_processed")
         if run.get("errors_json"):
             try:
                 run["errors"] = json.loads(run["errors_json"])
             except json.JSONDecodeError:
                 run["errors"] = {"raw": run["errors_json"]}
+        if run.get("errors"):
+            reason = _humanize_reason((run["errors"] or {}).get("reason"))
+            raw = _humanize_reason((run["errors"] or {}).get("raw"))
+            if reason:
+                run["errors"]["reason"] = reason
+            if raw:
+                run["errors"]["raw"] = raw
         runs.append(run)
 
     preview_claims: List[Dict[str, Any]] = []
@@ -1455,13 +1897,28 @@ def collect_message_insight(session: Any, message_id: str) -> Dict[str, Any]:
         if replacement_fact:
             replacement["replacement_display_summary"] = _render_record_display_text(replacement_fact, entity_display_names)
 
+    normalized_status = _normalize_status_for_insight(
+        message.get("saia_status"),
+        default="disabled" if not is_enabled() else "not_processed",
+    )
+    saia_error = _humanize_reason(message.get("saia_error")) or (
+        "SAIA processing is disabled in backend configuration." if not is_enabled() else None
+    )
+    warnings: List[str] = []
+    if saia_error:
+        warnings.append(saia_error)
+    for run in runs:
+        run_error = (run.get("errors") or {}).get("reason") or (run.get("errors") or {}).get("raw")
+        if run_error and run_error not in warnings:
+            warnings.append(str(run_error))
+
     return {
         "message_id": message_id,
         "message_source": message.get("source"),
-        "saia_status": message.get("saia_status") or ("disabled" if not is_enabled() else None),
+        "saia_status": normalized_status,
         "saia_processed_at": message.get("saia_processed_at"),
-        "saia_error": message.get("saia_error")
-        or ("SAIA processing is disabled in backend configuration." if not is_enabled() else None),
+        "saia_error": saia_error,
+        "warnings": warnings,
         "source_documents": source_documents,
         "runs": runs,
         "claims": claims,
@@ -1517,8 +1974,11 @@ def _persist_run(session: Any, run_id: str, context: GroundingContext, result: D
 
 def _finalize_run(session: Any, context: GroundingContext, result: Dict[str, Any], *, reason: Optional[str]) -> None:
     result["reason"] = reason
-    _persist_run(session, _make_run_id(context), context, result)
-    _mark_source_status(session, context, result["status"], reason)
+    canonical_status = _normalize_status_for_insight(result.get("status"), default="not_processed")
+    persisted_result = dict(result)
+    persisted_result["status"] = canonical_status
+    _persist_run(session, _make_run_id(context), context, persisted_result)
+    _mark_source_status(session, context, canonical_status, reason)
 
 
 def _mark_source_status(session: Any, context: GroundingContext, status: str, error: Optional[str]) -> None:

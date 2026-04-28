@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 import json
 import logging
+import os
 import shutil
 import sys
 from typing import Any, Dict, List, Literal, Optional
@@ -19,11 +20,13 @@ from neo4j.exceptions import ServiceUnavailable, SessionExpired
 from pydantic import BaseModel, Field
 
 try:
+    import app.agentic as agentic
     import app.chat_store as chat_store
     import app.saia as saia
     import app.services as services
     import app.utils as utils
 except ImportError:
+    import agentic
     import chat_store
     import saia
     import services
@@ -54,6 +57,7 @@ class ChatRequest(BaseModel):
     message: str
     history: Optional[List[Dict[str, str]]] = Field(default_factory=list)
     user_id: Optional[str] = None
+    agentic_mode: bool = False
 
 
 class AnswerPayload(BaseModel):
@@ -87,6 +91,9 @@ class DocumentProcessResponse(BaseModel):
     subject: str
     success: bool
     message: str
+    warnings: List[str] = Field(default_factory=list)
+    saia_status: Optional[str] = None
+    saia_last_error: Optional[str] = None
 
 
 class GraphDebugResponse(BaseModel):
@@ -108,6 +115,7 @@ class GraphPathRelationship(BaseModel):
     type: str
     source: str
     target: str
+    direction: Optional[str] = None
 
 
 class GraphRetrievalPathResponse(BaseModel):
@@ -260,6 +268,30 @@ def _normalize_optional_text(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value.strip() else None
 
 
+def _normalize_saia_status(status: Optional[str], *, default: str = "not_processed") -> str:
+    normalized = (status or "").strip().lower()
+    if not normalized:
+        return default
+    return {
+        "completed": "succeeded",
+        "succeeded": "succeeded",
+        "failed": "failed",
+        "disabled": "disabled",
+        "skipped": "not_processed",
+        "not_processed": "not_processed",
+    }.get(normalized, normalized)
+
+
+def _saia_warning_message(status: str, reason: Optional[str]) -> Optional[str]:
+    if status == "disabled":
+        return reason or "SAIA processing is disabled in backend configuration."
+    if status == "failed":
+        return reason or "SAIA processing failed."
+    if status == "not_processed" and reason:
+        return reason
+    return None
+
+
 def _parse_receiver_ids(receiver_id: Optional[str], receiver_ids_json: Optional[str]) -> List[str]:
     if isinstance(receiver_ids_json, str) and receiver_ids_json:
         try:
@@ -345,7 +377,7 @@ def _build_document_payload(
     normalized_linked_message_id = _normalize_optional_text(linked_message_id)
 
     receivers = _parse_receiver_ids(normalized_receiver_id, normalized_receiver_ids_json) or structured.get("receivers") or []
-    subject = normalized_attachment_name or filename or structured.get("subject") or "Uploaded document"
+    subject = structured.get("subject") or normalized_attachment_name or filename or "Uploaded document"
     sender = normalized_sender_id or structured.get("sender") or "Unknown"
     actual_source = normalized_source or ("message_attachment" if normalized_linked_message_id else "document_upload")
     actual_conversation_id = _derive_conversation_id(
@@ -373,6 +405,9 @@ def _build_document_payload(
         "linked_message_id": normalized_linked_message_id,
         "trace_json": None,
         "graph_sync_status": chat_store.GRAPH_SYNC_READY,
+        "schema_version": 1,
+        "source_version": 1,
+        "source_normalized": actual_source,
     }
 
 
@@ -573,6 +608,8 @@ async def get_message_saia_insight_endpoint(
             if not access_rows:
                 raise HTTPException(status_code=403, detail="Message not found or access denied")
             return saia.collect_message_insight(session, message_id)
+    except (ServiceUnavailable, SessionExpired) as exc:
+        _raise_graph_unavailable("loading SAIA insight", exc)
     finally:
         driver.close()
 
@@ -582,6 +619,29 @@ async def chat_endpoint(request: ChatRequest):
     message = request.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message is required")
+
+    if request.agentic_mode:
+        result = agentic.run_agentic_query(
+            message,
+            user_id=request.user_id,
+            history=request.history,
+        )
+        trace = result.get("trace") or {}
+        answer_payload = result.get("answer_payload") or {
+            "schema_version": 1,
+            "mode": "short",
+            "reason_code": "fallback_invalid_json",
+            "summary": result.get("answer", "") or "I couldn't produce a readable answer from the available evidence.",
+            "bullets": [],
+            "explanation": "SAGE returned a safe short answer because the detailed response could not be formatted reliably.",
+            "evidence_refs": services._derive_evidence_refs(retrieval_trace=trace),
+        }
+        return {
+            "answer": answer_payload.get("summary", result.get("answer", "")),
+            "answer_payload": answer_payload,
+            "thinking": result.get("thinking") or [],
+            "trace": trace,
+        }
 
     graph_result = query_graph_with_trace(message, user_id=request.user_id)
     ai_result = generate_groq_response(
@@ -638,10 +698,11 @@ async def process_document(
 
         content = _extract_document_text(stored_path, file.filename)
         normalized_linked_message_id = _normalize_optional_text(linked_message_id)
+        content_hash = utils.generate_doc_id(content)
         doc_id = (
-            f"message-attachment-{normalized_linked_message_id}"
+            f"message-attachment-{normalized_linked_message_id}-{content_hash[:12]}"
             if normalized_linked_message_id
-            else utils.generate_doc_id(content)
+            else content_hash
         )
         payload = _build_document_payload(
             doc_id=doc_id,
@@ -664,9 +725,13 @@ async def process_document(
         if not store_in_neo4j(payload):
             raise HTTPException(status_code=500, detail="Failed to store document in the graph database.")
 
+        warnings: List[str] = []
+        saia_status = "disabled" if not saia.is_enabled() else "not_processed"
+        saia_last_error: Optional[str] = None
+
         if payload["source"] == "message_attachment" and normalized_linked_message_id:
             try:
-                saia.process_message_attachment(
+                saia_result = saia.process_message_attachment(
                     doc_id=payload["doc_id"],
                     linked_message_id=normalized_linked_message_id,
                     sender_id=payload["sender"],
@@ -679,8 +744,16 @@ async def process_document(
                     source=payload["source"],
                     attachment_name=payload["attachment_name"],
                 )
+                saia_status = _normalize_saia_status((saia_result or {}).get("status"))
+                saia_last_error = (saia_result or {}).get("reason")
             except Exception as exc:  # pragma: no cover - defensive
                 logger.error("SAIA processing failed for attachment %s: %s", payload["doc_id"], exc)
+                saia_status = "failed"
+                saia_last_error = str(exc)
+
+            warning_message = _saia_warning_message(saia_status, saia_last_error)
+            if warning_message:
+                warnings.append(warning_message)
 
         return {
             "doc_id": payload["doc_id"],
@@ -689,6 +762,9 @@ async def process_document(
             "subject": payload["subject"],
             "success": True,
             "message": "Document processed and stored in the graph database.",
+            "warnings": warnings,
+            "saia_status": saia_status,
+            "saia_last_error": saia_last_error,
         }
     finally:
         try:
@@ -700,7 +776,17 @@ async def process_document(
 
 
 @app.get("/api/debug-graph", response_model=GraphDebugResponse)
-async def debug_graph_endpoint(summary_only: bool = False):
+async def debug_graph_endpoint(
+    summary_only: bool = False,
+    limit: int = 50,
+    auth_token: Optional[str] = Header(default=None, alias="X-Debug-Auth"),
+):
+    required_token = (os.getenv("DEBUG_GRAPH_AUTH_TOKEN") or "").strip()
+    if required_token:
+        if not auth_token or auth_token.strip() != required_token:
+            raise HTTPException(status_code=401, detail="Unauthorized debug access")
+
+    safe_limit = max(1, min(int(limit), 500))
     driver = utils.create_neo4j_driver()
     try:
         with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
@@ -735,8 +821,9 @@ async def debug_graph_endpoint(summary_only: bool = False):
                        d.timestamp AS Timestamp,
                        d.source AS Source
                 ORDER BY d.timestamp DESC
-                LIMIT 5
-                """
+                LIMIT $safe_limit
+                """,
+                safe_limit=safe_limit,
             ).data()
             connectivity = session.run(
                 """
@@ -753,8 +840,9 @@ async def debug_graph_endpoint(summary_only: bool = False):
                        p.name AS Name,
                        COUNT { (p)--() } AS ConnectionCount
                 ORDER BY ConnectionCount DESC
-                LIMIT 10
-                """
+                LIMIT $safe_limit
+                """,
+                safe_limit=safe_limit,
             ).data()
 
         return {
@@ -764,6 +852,8 @@ async def debug_graph_endpoint(summary_only: bool = False):
             "connectivity": connectivity,
             "entity_doc_connections": entity_doc_connections,
         }
+    except (ServiceUnavailable, SessionExpired) as exc:
+        _raise_graph_unavailable("inspecting the graph", exc)
     except Exception as exc:
         logger.error("Graph debug failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Failed to inspect graph: {exc}") from exc
@@ -890,6 +980,7 @@ async def debug_retrieval_path_endpoint(
                         type=str(row.get("pd_type") or "SENT_OR_RECEIVED"),
                         source=person_node.element_id,
                         target=document_node.element_id,
+                        direction="source_to_target",
                     )
                 )
 
@@ -898,6 +989,7 @@ async def debug_retrieval_path_endpoint(
                     type="PART_OF",
                     source=chunk_node.element_id,
                     target=document_node.element_id,
+                    direction="source_to_target",
                 )
             )
 
@@ -907,6 +999,7 @@ async def debug_retrieval_path_endpoint(
                         type=str(row.get("r_type") or "RELATED_TO"),
                         source=chunk_node.element_id,
                         target=related_node.element_id,
+                        direction="source_to_target",
                     )
                 )
 
@@ -917,6 +1010,8 @@ async def debug_retrieval_path_endpoint(
             )
     except HTTPException:
         raise
+    except (ServiceUnavailable, SessionExpired) as exc:
+        _raise_graph_unavailable("inspecting the retrieval path", exc)
     except Exception as exc:
         logger.error("Debug retrieval path failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Failed to inspect retrieval path: {exc}") from exc
@@ -930,12 +1025,16 @@ async def debug_subgraph_endpoint(
     depth: int = 2,
     node_limit: int = 80,
     rel_limit: int = 120,
+    related_node_id: Optional[str] = None,
 ):
     """Return a neighborhood subgraph around a chunk for visualization.
 
     This is meant for UI debugging: show the *actual* Neo4j nodes/relationships
     near the Top-1 evidence chunk, up to `depth` hops.
     """
+
+    if not chunk_id.strip():
+        raise HTTPException(status_code=400, detail="chunk_id is required")
 
     safe_depth = max(1, min(int(depth), 4))
     safe_node_limit = max(10, min(int(node_limit), 250))
@@ -944,11 +1043,17 @@ async def debug_subgraph_endpoint(
     driver = utils.create_neo4j_driver()
     try:
         with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
+            related_filter = ""
+            if related_node_id:
+                related_filter = "WHERE elementId(m) = $related_node_id OR m.id = $related_node_id"
+
             nodes_query = f"""
             MATCH (c:Chunk {{chunk_id: $chunk_id}})
             MATCH p=(c)-[*0..{safe_depth}]-(m)
+            {related_filter}
             UNWIND nodes(p) AS n
             WITH DISTINCT n
+            ORDER BY coalesce(n.id, n.doc_id, n.chunk_id, n.subject, n.name, elementId(n))
             RETURN elementId(n) AS element_id,
                    labels(n) AS labels,
                    properties(n) AS props
@@ -958,8 +1063,10 @@ async def debug_subgraph_endpoint(
             rels_query = f"""
             MATCH (c:Chunk {{chunk_id: $chunk_id}})
             MATCH p=(c)-[*1..{safe_depth}]-(m)
+            {related_filter}
             UNWIND relationships(p) AS r
             WITH DISTINCT r
+            ORDER BY type(r), elementId(startNode(r)), elementId(endNode(r))
             RETURN elementId(startNode(r)) AS source,
                    elementId(endNode(r)) AS target,
                    type(r) AS type
@@ -970,11 +1077,13 @@ async def debug_subgraph_endpoint(
                 nodes_query,
                 chunk_id=chunk_id,
                 node_limit=safe_node_limit,
+                related_node_id=related_node_id,
             ).data()
             rel_rows = session.run(
                 rels_query,
                 chunk_id=chunk_id,
                 rel_limit=safe_rel_limit,
+                related_node_id=related_node_id,
             ).data()
 
         nodes_out: List[GraphPathNode] = []
@@ -1011,6 +1120,7 @@ async def debug_subgraph_endpoint(
                 type=str(row.get("type") or "RELATED_TO"),
                 source=str(row.get("source") or ""),
                 target=str(row.get("target") or ""),
+                direction="source_to_target",
             )
             for row in rel_rows
             if row.get("source") and row.get("target")
@@ -1024,6 +1134,8 @@ async def debug_subgraph_endpoint(
             nodes=nodes_out,
             relationships=rels_out,
         )
+    except (ServiceUnavailable, SessionExpired) as exc:
+        _raise_graph_unavailable("loading the debug subgraph", exc)
     except HTTPException:
         raise
     except Exception as exc:

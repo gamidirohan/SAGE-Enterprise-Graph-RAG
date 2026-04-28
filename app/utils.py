@@ -45,14 +45,30 @@ MODEL_CACHE_DIR = ROOT_DIR / ".cache" / "models"
 MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def create_neo4j_driver(uri: str = NEO4J_URI, user: str = NEO4J_USER, password: str = NEO4J_PASSWORD):
-    return GraphDatabase.driver(uri, auth=(user, password))
+def create_neo4j_driver(uri: str = NEO4J_URI, user: str = NEO4J_USER, password: str = NEO4J_PASSWORD, *, max_retries: int = 3):
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return GraphDatabase.driver(uri, auth=(user, password))
+        except Exception as exc:  # pragma: no cover - network/driver errors
+            last_exc = exc
+            if attempt == max_retries:
+                raise
+    raise last_exc or RuntimeError("Failed to create Neo4j driver")
 
 
-def open_neo4j_session(driver, database: str = NEO4J_DATABASE):
-    if database:
-        return driver.session(database=database)
-    return driver.session()
+def open_neo4j_session(driver, database: str = NEO4J_DATABASE, *, max_retries: int = 3):
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            if database:
+                return driver.session(database=database)
+            return driver.session()
+        except Exception as exc:  # pragma: no cover - transient driver errors
+            last_exc = exc
+            if attempt == max_retries:
+                raise
+    raise last_exc or RuntimeError("Failed to open Neo4j session")
 
 
 @lru_cache(maxsize=1)
