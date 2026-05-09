@@ -11,6 +11,7 @@ from uuid import uuid4
 try:
     import app.graph_query as graph_query
     import app.policy_guard as policy_guard
+    import app.query_shape as query_shape
     import app.rerank as rerank
     import app.retrieval_selector as retrieval_selector
     import app.services as services
@@ -18,6 +19,7 @@ try:
 except ImportError:  # pragma: no cover - direct execution fallback
     import graph_query
     import policy_guard
+    import query_shape
     import rerank
     import retrieval_selector
     import services
@@ -158,6 +160,64 @@ def _extract_constraints(query: str) -> Dict[str, Any]:
     return {key: value for key, value in constraints.items() if value}
 
 
+def _normalize_signature_text(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _evidence_signature(item: Dict[str, Any]) -> str:
+    fact = item.get("fact") or {}
+    document = item.get("document") or {}
+    parts = [
+        item.get("fact_summary"),
+        item.get("chunk_summary"),
+        fact.get("canonical_key"),
+        fact.get("subject_entity_id"),
+        fact.get("subject_key"),
+        fact.get("object_entity_id"),
+        fact.get("object_key"),
+        item.get("relationship"),
+        document.get("subject"),
+    ]
+    normalized_parts = [_normalize_signature_text(part) for part in parts if _normalize_signature_text(part)]
+    if normalized_parts:
+        return " | ".join(normalized_parts[:4])
+    if item.get("fact_id"):
+        return f"fact:{item['fact_id']}"
+    if item.get("chunk_id"):
+        return f"chunk:{item['chunk_id']}"
+    if document.get("doc_id"):
+        return f"doc:{document['doc_id']}"
+    return f"unknown:{hash(str(item))}"
+
+
+def _trace_coverage(
+    trace: Dict[str, Any],
+    reasoning: Dict[str, Any],
+    *,
+    plan: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    evidence = list((trace or {}).get("evidence") or [])
+    signatures = {_evidence_signature(item) for item in evidence}
+    profile = dict(
+        ((trace or {}).get("query_profile") or {})
+        or ((plan or {}).get("query_profile") or {})
+        or {}
+    )
+    return {
+        "distinct_evidence_count": len(signatures),
+        "validated_evidence_count": int(reasoning.get("validated_evidence_count") or 0),
+        "has_fact": any(item.get("fact_id") for item in evidence),
+        "has_supporting_doc_or_chunk": any(
+            item.get("chunk_id") or (item.get("document") or {}).get("doc_id")
+            for item in evidence
+        ),
+        "expects_multiple_items": bool(profile.get("expects_multiple_items")),
+        "requires_broad_coverage": bool(profile.get("requires_broad_coverage")),
+        "minimum_unique_evidence": int(profile.get("minimum_unique_evidence") or 1),
+        "minimum_tool_rounds": int(profile.get("minimum_tool_rounds") or 1),
+    }
+
+
 def _infer_intent(query: str, constraints: Dict[str, Any]) -> str:
     lowered = query.lower()
     if constraints.get("policy_terms") or any(token in lowered for token in ("audit", "compliance", "violation", "violated")):
@@ -215,7 +275,10 @@ def build_plan(query: str, *, user_id: Optional[str] = None) -> Dict[str, Any]:
     entities = _extract_entities(query)
     extracted_constraints = _extract_constraints(query)
     intent = _infer_intent(query, extracted_constraints)
+    query_profile = query_shape.analyze_query(query)
     risk_flags = _risk_flags_for(query, extracted_constraints)
+    if query_profile.get("expects_multiple_items"):
+        risk_flags.append("requires_answer_diversity")
     # Enforce both semantic and BM25 for exact-term / policy queries to satisfy playbook.
     default_steps = ["semantic", "fulltext", "graph"]
     if selector["strategy"] == "fulltext":
@@ -229,6 +292,7 @@ def build_plan(query: str, *, user_id: Optional[str] = None) -> Dict[str, Any]:
         "intent": intent,
         "entities": entities,
         "extracted_constraints": extracted_constraints,
+        "query_profile": query_profile,
         "required_evidence": _required_evidence_for(query, intent, extracted_constraints),
         "risk_flags": risk_flags,
         "strategy": selector["strategy"],
@@ -244,8 +308,10 @@ def build_plan(query: str, *, user_id: Optional[str] = None) -> Dict[str, Any]:
         "tool_sequence": initial_steps,
         "tool_plan": _tool_plan_for(initial_steps),
         "stop_conditions": [
-            "at_least_two_evidence_refs_with_one_validated_binding",
-            "one_canonical_fact_plus_supporting_source",
+            "grounded_evidence_threshold",
+            "one_canonical_fact_plus_supporting_source_for_single_lookup",
+            "distinct_evidence_coverage_for_multi_item_queries",
+            "minimum_tool_rounds_for_broad_coverage_queries",
             "round_budget_exhausted",
         ],
         "steps": [
@@ -274,6 +340,7 @@ def _blank_trace(*, query: str, user_id: Optional[str]) -> Dict[str, Any]:
         "evidence": [],
         "no_evidence": True,
         "evidence_state": "no_evidence",
+        "query_profile": query_shape.analyze_query(query),
     }
 
 
@@ -325,17 +392,26 @@ def _record_tool_call(
     )
 
 
-def _enough_context(trace: Dict[str, Any], reasoning: Dict[str, Any]) -> bool:
-    evidence = list((trace or {}).get("evidence") or [])
+def _enough_context(
+    trace: Dict[str, Any],
+    reasoning: Dict[str, Any],
+    *,
+    plan: Optional[Dict[str, Any]] = None,
+    attempt: int = 1,
+) -> bool:
+    coverage = _trace_coverage(trace, reasoning, plan=plan)
+    if coverage["requires_broad_coverage"] and attempt < coverage["minimum_tool_rounds"]:
+        return False
+    if coverage["expects_multiple_items"]:
+        return (
+            coverage["distinct_evidence_count"] >= coverage["minimum_unique_evidence"]
+            and coverage["validated_evidence_count"] >= coverage["minimum_unique_evidence"]
+        )
+    if coverage["has_fact"] and coverage["has_supporting_doc_or_chunk"]:
+        return True
     evidence_refs = services._derive_evidence_refs(retrieval_trace=trace, limit=8)
     unique_refs = len(set(evidence_refs))
-    validated_bindings = int(reasoning.get("validated_evidence_count") or 0)
-    has_fact = any(item.get("fact_id") for item in evidence)
-    has_supporting_doc_or_chunk = any(
-        item.get("chunk_id") or (item.get("document") or {}).get("doc_id")
-        for item in evidence
-    )
-    return (unique_refs >= 2 and validated_bindings >= 1) or (has_fact and has_supporting_doc_or_chunk)
+    return unique_refs >= 2 and coverage["validated_evidence_count"] >= 1
 
 
 def _run_retrieval_round(
@@ -492,16 +568,25 @@ def _run_retrieval_round(
         attempt=attempt,
     )
     reasoning = graph_query.validate_trace_paths(reranked.get("trace"))
-    enough_context = _enough_context(reranked.get("trace") or {}, reasoning)
+    trace_with_profile = dict(reranked.get("trace") or {})
+    trace_with_profile["query_profile"] = (
+        (state.get("plan") or {}).get("query_profile")
+        or trace_with_profile.get("query_profile")
+        or query_shape.analyze_query(state.get("query") or "")
+    )
+    coverage = _trace_coverage(trace_with_profile, reasoning, plan=state.get("plan"))
+    trace_with_profile["coverage"] = coverage
+    enough_context = _enough_context(trace_with_profile, reasoning, plan=state.get("plan"), attempt=attempt)
 
     state["documents"] = reranked.get("documents") or []
-    state["trace"] = reranked.get("trace") or {}
+    state["trace"] = trace_with_profile
     state["rounds"].append(
         {
             "attempt": attempt,
             "tool": tool_name,
             "result_count": int((state["trace"] or {}).get("result_count") or 0),
             "evidence_ref_count": len(services._derive_evidence_refs(retrieval_trace=state["trace"], limit=8)),
+            "distinct_evidence_count": int(((state["trace"] or {}).get("coverage") or {}).get("distinct_evidence_count") or 0),
             "validated_evidence_count": int(reasoning.get("validated_evidence_count") or 0),
             "enough_context": enough_context,
         }
@@ -540,6 +625,8 @@ def _choose_retry_tool(plan: Dict[str, Any], state: Dict[str, Any], critic: Dict
         preferred_order = ["fulltext", "semantic", "graph"]
     if "missing_exact_match" in issues:
         preferred_order = ["fulltext", "semantic", "graph"]
+    if "insufficient_answer_coverage" in issues:
+        preferred_order = ["fulltext", "graph", "semantic"]
     for tool_name in preferred_order:
         if tool_name not in used:
             return tool_name
@@ -575,6 +662,7 @@ def run_agentic_query(
     try:
         plan = build_plan(query, user_id=user_id)
         state["plan"] = plan
+        state["trace"]["query_profile"] = plan.get("query_profile") or state["trace"].get("query_profile")
         _emit_event(
             state,
             event_sink,

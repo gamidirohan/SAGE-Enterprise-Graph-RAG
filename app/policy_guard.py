@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+try:
+    import app.query_shape as query_shape
+except ImportError:  # pragma: no cover - direct execution fallback
+    import query_shape
+
 
 _UNCERTAINTY_MARKERS = (
     "don't have any specific information",
@@ -23,18 +28,25 @@ def evaluate_answer(
     trace: Dict[str, Any] | None,
     plan: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    del plan
-
     issues: List[str] = []
     evidence = list((trace or {}).get("evidence") or [])
     evidence_refs = list((answer_payload or {}).get("evidence_refs") or [])
     normalized_answer = (answer or "").lower()
+    profile = dict(
+        ((trace or {}).get("query_profile") or {})
+        or ((plan or {}).get("query_profile") or {})
+        or query_shape.analyze_query(query)
+    )
+    coverage = dict((trace or {}).get("coverage") or {})
 
     if not evidence and not any(marker in normalized_answer for marker in _UNCERTAINTY_MARKERS):
         issues.append("missing_grounded_uncertainty")
 
     if any(token in (query or "").lower() for token in _POLICY_TOKENS) and not evidence_refs:
         issues.append("missing_policy_provenance")
+
+    if profile.get("expects_multiple_items") and int(coverage.get("distinct_evidence_count") or 0) < int(profile.get("minimum_unique_evidence") or 1):
+        issues.append("insufficient_answer_coverage")
 
     return {
         "passed": not issues,

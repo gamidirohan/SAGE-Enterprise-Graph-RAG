@@ -15,11 +15,16 @@ from zoneinfo import ZoneInfo
 import numpy as np
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_groq import ChatGroq
+try:
+    from langchain_groq import ChatGroq
+except Exception:  # pragma: no cover - optional during test collection
+    ChatGroq = None
 
 try:
+    import app.query_shape as query_shape
     import app.utils as utils
 except ImportError:
+    import query_shape
     import utils
 
 
@@ -365,6 +370,7 @@ CHAT_PROMPT = ChatPromptTemplate.from_template(
     - If mode is `short`, keep the answer compact and only add bullets if they materially help
     - If mode is `long`, keep one clear summary and add concise bullets when extra detail helps
     - Long mode means more detail, not less structure
+    - Question shape guidance: {question_shape_guidance}
 
     Here is the user's question: {query}
 
@@ -383,6 +389,8 @@ CHAT_PROMPT = ChatPromptTemplate.from_template(
 
 
 def _create_groq_client(*, temperature: float, require_json: bool = False):
+    if ChatGroq is None:
+        raise RuntimeError("langchain_groq is unavailable")
     kwargs: Dict[str, Any] = {
         "model_name": utils.GROQ_MODEL,
         "temperature": temperature,
@@ -484,6 +492,7 @@ def _select_answer_mode(query: str, retrieval_trace: Optional[Dict[str, Any]] = 
     query_type = (retrieval_trace or {}).get("query_type")
     result_count = int((retrieval_trace or {}).get("result_count") or 0)
     max_hop_count = int((retrieval_trace or {}).get("max_hop_count") or 0)
+    query_profile = dict((retrieval_trace or {}).get("query_profile") or query_shape.analyze_query(query))
 
     # TODO(agentic): Future planner/critic flows can replace this selector, but they must keep the
     # stable answer payload contract and return the same mode/reason_code semantics to the UI.
@@ -492,6 +501,8 @@ def _select_answer_mode(query: str, retrieval_trace: Optional[Dict[str, Any]] = 
     if _contains_phrase(query, LONG_OVERRIDE_PHRASES):
         return ANSWER_MODE_LONG, REASON_CODE_EXPLICIT_LONG
     if query_type == "compound_lookup":
+        return ANSWER_MODE_LONG, REASON_CODE_EVIDENCE_COMPLEXITY
+    if query_profile.get("wants_list_format") or query_profile.get("requires_broad_coverage"):
         return ANSWER_MODE_LONG, REASON_CODE_EVIDENCE_COMPLEXITY
     if _looks_like_broad_or_explanatory_request(query, query_type):
         return ANSWER_MODE_LONG, REASON_CODE_BROAD_OR_EXPLANATORY
@@ -1401,12 +1412,14 @@ def generate_groq_response(
 
     try:
         context = _build_response_context(documents, retrieval_trace=retrieval_trace)
+        query_profile = dict((retrieval_trace or {}).get("query_profile") or query_shape.analyze_query(query))
         user_context = "No authenticated user context was provided."
         if user_id:
             user_context = f"Authenticated user id: {user_id}."
             if _contains_first_person(query):
                 user_context += " Treat first-person references (I/me/my) as this user unless the query says otherwise."
         retrieval_guidance = "Use only the retrieved evidence. If evidence is weak or missing, say so clearly."
+        question_shape_guidance = "Answer directly from the available evidence."
         query_type = (retrieval_trace or {}).get("query_type")
         if query_type:
             user_context += f" Query classification: {query_type}."
@@ -1418,6 +1431,14 @@ def generate_groq_response(
         elif (retrieval_trace or {}).get("evidence"):
             retrieval_guidance = (
                 "Canonical facts are the highest-trust evidence layer. If a canonical fact conflicts with a chunk summary, trust the canonical fact and mention the discrepancy."
+            )
+        if query_profile.get("wants_list_format"):
+            question_shape_guidance = (
+                "The user is asking for multiple items. Keep the answer set-oriented, surface distinct supported items, "
+                "and do not rewrite the question into a single-person lookup unless the evidence only supports one item."
+            )
+            retrieval_guidance += (
+                " Prefer distinct evidence items over near-duplicate restatements when summarizing the answer."
             )
         if any(
             (item.get("document") or {}).get("conversation_type") == "group"
@@ -1436,6 +1457,7 @@ def generate_groq_response(
                 "user_context": user_context,
                 "retrieval_guidance": retrieval_guidance,
                 "answer_mode": mode,
+                "question_shape_guidance": question_shape_guidance,
             }
         )
         parsed = _parse_answer_response(response, mode=mode)

@@ -5,6 +5,7 @@ access, document chunking, and other reusable building blocks.
 """
 
 import hashlib
+import importlib
 import os
 import re
 import zipfile
@@ -14,9 +15,6 @@ from typing import List
 from xml.etree import ElementTree
 
 from dotenv import load_dotenv
-from neo4j import GraphDatabase
-from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
 
 
 # Keep model download/loading output concise in app logs.
@@ -45,7 +43,29 @@ MODEL_CACHE_DIR = ROOT_DIR / ".cache" / "models"
 MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _load_neo4j_driver_class():
+    try:
+        return importlib.import_module("neo4j").GraphDatabase
+    except Exception as exc:  # pragma: no cover - optional during test collection
+        raise RuntimeError("neo4j driver is unavailable") from exc
+
+
+def _load_pdf_reader():
+    try:
+        return importlib.import_module("pypdf").PdfReader
+    except Exception as exc:  # pragma: no cover - optional during test collection
+        raise RuntimeError("pypdf is unavailable") from exc
+
+
+def _load_sentence_transformer_class():
+    try:
+        return importlib.import_module("sentence_transformers").SentenceTransformer
+    except Exception as exc:  # pragma: no cover - optional during test collection
+        raise RuntimeError("sentence-transformers is unavailable") from exc
+
+
 def create_neo4j_driver(uri: str = NEO4J_URI, user: str = NEO4J_USER, password: str = NEO4J_PASSWORD, *, max_retries: int = 3):
+    GraphDatabase = _load_neo4j_driver_class()
     last_exc: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -73,6 +93,7 @@ def open_neo4j_session(driver, database: str = NEO4J_DATABASE, *, max_retries: i
 
 @lru_cache(maxsize=1)
 def get_cached_embedding_model(model_name: str = EMBEDDING_MODEL):
+    SentenceTransformer = _load_sentence_transformer_class()
     # Prefer local cache first; if files are incomplete/missing, fall back to
     # one network fetch into cache and reuse it on subsequent runs.
     try:
@@ -99,6 +120,7 @@ def generate_doc_id(content: str) -> str:
 
 
 def extract_text_from_pdf(file_path) -> str:
+    PdfReader = _load_pdf_reader()
     with open(file_path, "rb") as f:
         pdf_reader = PdfReader(f)
         return " ".join([page.extract_text() for page in pdf_reader.pages if page.extract_text()])
