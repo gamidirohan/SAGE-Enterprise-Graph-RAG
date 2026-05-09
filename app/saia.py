@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover - import fallback for direct execution
 
 logger = logging.getLogger(__name__)
 
-_ALLOWED_SOURCES = {"chat_message", "message_attachment"}
+_ALLOWED_SOURCES = {"chat_message", "message_attachment", "document_upload"}
 _NON_CANONICAL_CLAIM_TYPES = {"REQUEST"}
 
 TIMEZONE_DEFAULT = os.getenv("SAIA_DEFAULT_TIMEZONE", "UTC")
@@ -288,6 +288,36 @@ def process_message_attachment(
         source_doc_id=doc_id,
         source_message_id=linked_message_id,
         linked_message_id=linked_message_id,
+        sender_id=sender_id,
+        receiver_ids=list(receiver_ids),
+        conversation_id=conversation_id,
+        conversation_type=conversation_type,
+        group_id=group_id,
+        sent_at=sent_at,
+        source=source,
+        attachment_name=attachment_name,
+    )
+    return process_text(content, context)
+
+
+def process_document_upload(
+    *,
+    doc_id: str,
+    sender_id: str,
+    receiver_ids: Sequence[str],
+    conversation_id: Optional[str],
+    conversation_type: Optional[str],
+    group_id: Optional[str],
+    sent_at: str,
+    content: str,
+    source: str = "document_upload",
+    attachment_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    context = GroundingContext(
+        source_kind="document_upload",
+        source_doc_id=doc_id,
+        source_message_id=None,
+        linked_message_id=None,
         sender_id=sender_id,
         receiver_ids=list(receiver_ids),
         conversation_id=conversation_id,

@@ -22,7 +22,4 @@ SAIA extracts structured claims from each chat message, grounds people and times
 - Person lookups filter to names in the query and use conversation metadata (type/id/group) to scope evidence.
 - Queries using "who/whom" are treated as direct lookups (short mode); broad/compare/audit/explain prompts select long mode, but long answers stay structured (summary + bullets).
 
-## Operational Note
-- If Neo4j is unreachable (e.g., Aura timeout), SAIA cannot promote facts. The `/api/bootstrap` endpoint now returns 503 in this state; health remains process-only. Retry once connectivity is restored.
-
 <!-- TODO: Future planner/critic flows may replace the producer, but must continue writing stable `answer_payload` and Neo4j facts as described above. -->

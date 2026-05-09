@@ -1,84 +1,372 @@
 Best next test sequence
 Use a direct chat with one person first.
 
+================================================================================
+TEST 1: Direct Commitment + Grounding
+================================================================================
 Send:
 I'll send you the Project Alpha budget by 6pm tomorrow.
 
 Ask SAGE:
 What did I promise to send and by when?
 
-Expected:
-one claim, one canonical fact, project text included.
+Features tested:
+  - SAIA claim extraction (TASK_ASSIGNMENT)
+  - Direct-message grounding & sender/receiver resolution
+  - Canonical fact promotion (direct 1:1 → canonical)
+  - Temporal reference normalization
 
+Expected (Chat):
+  SAGE should confirm: "You promised to send the Project Alpha budget by [tomorrow's date at 6pm]."
+
+Info-icon checks (click ℹ️ on SAGE response):
+  ✓ answer_payload.mode = "short" (or "direct_lookup")
+  ✓ answer_payload.reason_code present (e.g., "direct_lookup")
+  ✓ evidence_refs includes reference to the TASK_ASSIGNMENT canonical fact
+  ✓ grounding.references shows "I" → your_user_id and "you" → recipient_id (names, not IDs)
+  ✓ grounding.temporal_expressions = ["6pm", "tomorrow"] → normalized to ISO datetime
+  ✓ Confirm "Project Alpha" keyword included in retrieved context
+
+Code paths exercised:
+  - app.saia.extract_claims_from_text() + claim promotion
+  - app.saia.process_chat_message() → write canonical fact
+  - app.backend.query_graph_with_trace() → retrieval + grounding
+
+
+
+================================================================================
+TEST 2: Temporal Correction + Supersession Detection
+================================================================================
 Send:
 Correction: I'll send you the Project Alpha budget by 9pm tomorrow instead.
 
 Ask SAGE:
 When am I sending the Project Alpha budget now?
 
-Expected:
-latest fact should win; ideally replacement/supersession should show.
+Features tested:
+  - Temporal correction marker ("Correction:") stripping
+  - Conflict detection (old time vs new time for same task)
+  - Supersession linking (old fact → SUPERSEDED_BY → new fact)
+  - Latest fact retrieval
 
+Expected (Chat):
+  SAGE should say: "You're sending the Project Alpha budget by [tomorrow at 9pm]" (the NEW time, not 6pm).
+
+Info-icon checks:
+  ✓ answer_payload.reason_code suggests "fact_update" or "conflict_resolved"
+  ✓ evidence_refs points to the UPDATED canonical fact (with temporal_start = 9pm)
+  ✓ Ideally: UI shows a "supersession" indicator or chain:
+    - Old promise: 6pm tomorrow → Superseded
+    - Current promise: 9pm tomorrow → Active
+  ✓ Confirm grounding still resolves pronouns correctly
+
+Code paths exercised:
+  - app.saia.extract_claims_from_text() with correction marker stripping
+  - app.saia.process_chat_message() → conflict detection (conflicting REPORTS_TO or TASK_ASSIGNMENT)
+  - app.saia._supersede_conflicting_fact() → mark old fact SUPERSEDED_BY new fact
+
+
+
+================================================================================
+TEST 3: Person Lookup + Canonical REPORTS_TO
+================================================================================
 Send:
 Rohan reports to Hrithik.
 
 Ask SAGE:
 Who does Rohan report to?
 
-Expected:
-clean canonical fact.
+Features tested:
+  - Named entity resolution (Rohan → person_id, Hrithik → person_id)
+  - Person lookup from Neo4j graph
+  - REPORTS_TO claim type extraction
+  - Canonical fact creation for org structure
 
+Expected (Chat):
+  SAGE should say: "Rohan reports to Hrithik."
+
+Info-icon checks:
+  ✓ grounding.references["Rohan"] → display_name: "Rohan" (not raw ID)
+  ✓ grounding.references["Hrithik"] → display_name: "Hrithik"
+  ✓ answer_payload shows confidence or support_count (at least 1)
+  ✓ evidence_refs points to REPORTS_TO canonical fact
+
+Code paths exercised:
+  - app.saia._resolve_reference() → Neo4j person lookup
+  - app.saia.extract_claims_from_text() → REPORTS_TO claim type
+  - app.saia.should_promote_claim() → promotion to canonical
+  - Neo4j REPORTS_TO relationship write
+
+
+
+================================================================================
+TEST 4: Org Chart Update + Fact Supersession
+================================================================================
 Send:
 Rohan now reports to Anil.
 
 Ask SAGE:
 Who does Rohan report to now?
 
-Expected:
-old fact superseded, new one current.
+Features tested:
+  - Conflicting org-chart updates (same subject, different object)
+  - Supersession detection for REPORTS_TO predicates
+  - Temporal markers ("now") in commitment updates
 
-Send in a group chat:
+Expected (Chat):
+  SAGE should say: "Rohan reports to Anil." (the NEW manager, not Hrithik).
+
+Info-icon checks:
+  ✓ answer_payload.reason_code = "fact_update" or similar
+  ✓ evidence_refs points to Anil relationship (new fact)
+  ✓ Supersession chain visible:
+    - Old: "Rohan → Hrithik" (SUPERSEDED_BY)
+    - New: "Rohan → Anil" (CURRENT)
+  ✓ Display names rendered (not entity IDs)
+  ✓ Confirm temporal marker ("now") didn't incorrectly change temporal_start
+
+Code paths exercised:
+  - app.saia.process_chat_message() → detect conflicting REPORTS_TO fact
+  - app.saia._supersede_conflicting_fact() → link old→new with SUPERSEDED_BY
+  - app.saia._prefer_user_over_external_person() → if Anil is a User node, prefer it
+  - Neo4j relationship replacement
+
+
+
+================================================================================
+TEST 5: Group Chat Ambiguity + Non-Canonical Request
+================================================================================
+Send in a group chat (NOT a 1:1):
 Can you send the deck?
 
 Ask SAGE:
 Who was asked to send the deck?
 
-Expected:
-ambiguity. This should not become a clean canonical fact.
+Features tested:
+  - Group-scoped claim extraction
+  - Ambiguity detection (unspecified recipient in group context)
+  - Non-canonical claim (REQUEST instead of TASK_ASSIGNMENT)
+  - should_promote_claim() returns False
 
+Expected (Chat):
+  SAGE should be cautious and say something like:
+  "This is ambiguous—multiple people are in the group. Someone asked for the deck, but it's unclear who was being asked."
+  Or SAGE might say: "The request was made in a group, so it's unclear who should send the deck."
+
+Info-icon checks:
+  ✓ answer_payload.reason_code = "ambiguity" or "insufficient_grounding"
+  ✓ evidence_refs includes the REQUEST claim (NOT a canonical fact)
+  ✓ grounding.references shows group_id (not individual recipient_id)
+  ✓ Confirm no canonical REPORTS_TO or TASK_ASSIGNMENT was created for this message
+  ✓ preview_claim_count > 0 if SAIA is running in preview mode
+
+Code paths exercised:
+  - app.saia.extract_claims_from_text() → REQUEST claim (not TASK_ASSIGNMENT)
+  - app.saia.should_promote_claim() → returns False (unresolved recipient)
+  - app.saia.process_chat_message() → skips canonical fact creation
+  - Neo4j: Claim stored but no CanonicalFact node created
+
+
+
+================================================================================
+TEST 6: Group Meeting + Temporal Normalization
+================================================================================
 Send in a group chat:
 We have a Project Alpha review next Monday at 10am.
 
 Ask SAGE:
 When is the Project Alpha review?
 
-Expected:
-group-scoped meeting fact with normalized time.
+Features tested:
+  - Relative day normalization ("next Monday" → explicit date)
+  - Time normalization (10am → ISO datetime with timezone)
+  - Group-scoped MEETING_EVENT fact
+  - Multi-participant context resolution
 
-If you want the highest-signal order, do 1 -> 2 -> 3 -> 4 first.
-That sequence tests:
+Expected (Chat):
+  SAGE should confirm: "Project Alpha review is next Monday at 10am"
+  (showing normalized day & time, e.g., "2026-04-13 at 10:00 UTC")
 
-grounding
-temporal normalization
-conflict/supersession
-stable canonical retrieval
+Info-icon checks:
+  ✓ temporal_start = "2026-04-13T10:00:00+00:00" (or your timezone)
+  ✓ temporal_granularity = "datetime" (not just "date")
+  ✓ grounding.temporal_expressions = ["next Monday", "10am"]
+  ✓ subject_entity_id = group_id (not individual)
+  ✓ answer_payload.evidence_refs includes the MEETING_EVENT canonical fact
+  ✓ "Project Alpha" keyword visible in grounding or evidence
+
+Code paths exercised:
+  - app.saia.normalize_temporal_reference() → "next Monday" → explicit date
+  - app.saia.extract_claims_from_text() → MEETING_EVENT claim type
+  - app.saia.should_promote_claim() → True (unambiguous group meeting)
+  - Neo4j MEETING_EVENT node creation
+
+
+If you want the highest-signal order, do TEST 1 → TEST 2 → TEST 3 → TEST 4 first.
+That sequence validates:
+  - grounding (TEST 1, 3)
+  - temporal normalization (TEST 1, 2, 6)
+  - conflict/supersession (TEST 2, 4)
+  - stable canonical retrieval (all tests)
 
 
 
 
-Next patch I’d recommend:
+================================================================================
+NEXT PATCH: Long-Answer Mode + Planning
+================================================================================
 
-capture trailing qualifiers like For Project Alpha
-render names instead of raw IDs in the insight UI
+Next patch I'd recommend:
+  - Capture trailing qualifiers (e.g., "for Project Alpha") in claim payload
+  - Render display_names instead of raw IDs in the insight UI
+  - Validate structured `long` mode answer payloads
 
-Long-answer prompts to validate structured `long` mode
+Long-answer prompts to validate structured `long` mode:
 
+TEST 7: Multi-Fact Summary (Long Mode)
+Send:
 Give me a detailed summary of everything we know about Project Beta, including meetings, bugs, preparation work, and follow-up actions.
 
+Features tested:
+  - Multi-hop graph traversal (planner + retriever)
+  - Long-answer mode selection (reason_code = "explicit_long" or similar)
+  - Structured bullet-point response format
+  - Evidence aggregation across multiple fact types
+
+Info-icon checks:
+  ✓ answer_payload.mode = "long"
+  ✓ answer_payload.reason_code = "explicit_long" (or "multi_step_retrieval")
+  ✓ answer_payload.bullets populated (not just summary)
+  ✓ answer_payload.explanation = "SAGE expanded this answer because..."
+  ✓ evidence_refs includes 3+ fact IDs or chunks (multi-hop evidence)
+  ✓ hop_count >= 2 (if path data available)
+  ✓ path_summary or relationships order shows the graph path taken
+
+Code paths exercised:
+  - GAP (Planner Agent) → plan JSON with multiple retrieval steps
+  - Retriever → execute plan steps, merge results
+  - Backend → mark answer_payload.mode = "long"
+  - Provenance → include hop chain and evidence bundle
+
+
+TEST 8: Comparative Analysis (Planner-driven)
+Send:
 Compare Project Beta and Project Gamma based on the chat history, and explain the people involved, timelines, and next steps.
 
+Features tested:
+  - Multi-step planning (GAP → retrieval strategy for 2 entities)
+  - Conflict/difference resolution (comparing divergent timelines)
+  - Named entity resolution across multiple facts
+  - Structured comparison response
+
+Info-icon checks:
+  ✓ answer_payload.mode = "long"
+  ✓ evidence_refs includes facts for BOTH Project Beta and Project Gamma
+  ✓ hop_count present (expected: 2-3 hops per project, 4+ total)
+  ✓ path_summary shows traversal: Project → Meeting → Person → Project, etc.
+  ✓ Temporal data normalized and compared (timelines visible)
+  ✓ Display names rendered for all people mentioned
+
+Code paths exercised:
+  - GAP (Planner) → schema-aware plan with multiple entity lookups
+  - Symbolic reasoner → validate paths are real (G-CT)
+  - Retriever + Merger → combine results from both entity scopes
+  - Backend → long-answer formatting + comparison structure
+
+
+TEST 9: Person-Scoped Long Query
+Send:
 Explain all dashboard-related conversations with Elijah, including design review, brand guidelines, and dark mode status.
 
+Features tested:
+  - User-scoped retrieval (first-person = implicit user context, "Elijah" = named person)
+  - Message/fact filtering by participant
+  - Long-mode aggregation of related facts
+  - Temporal ordering (meetings, decisions, follow-ups)
+
+Info-icon checks:
+  ✓ answer_payload.trace.user_scoped = true (if user is asking about themselves)
+  ✓ evidence_refs filtered to messages/facts involving Elijah
+  ✓ Temporal data ordered (oldest → newest design decisions)
+  ✓ Display name "Elijah" (not entity ID)
+  ✓ answer_payload.mode = "long"
+
+
+TEST 10: Complex Multi-Project Context
+Send:
 Give me a detailed overview of Project Alpha across the chats, including API work, marketing materials, meetings, and promised deliverables.
 
+Features tested:
+  - Multi-type fact retrieval (TASK_ASSIGNMENT, MEETING_EVENT, STATUS_UPDATE, etc.)
+  - Keyword/tag aggregation ("Project Alpha" across all claim types)
+  - Provenance linking (which message/attachment provided each piece of info)
+  - Long-answer with structured sections
+
+Info-icon checks:
+  ✓ answer_payload.mode = "long"
+  ✓ evidence_refs aggregates different claim types (meetings, tasks, decisions)
+  ✓ hop_count indicates multi-step traversal (Person → Message → Project → Task, etc.)
+  ✓ path_summary shows primary retrieval path
+  ✓ Each bullet point can be traced to an evidence_ref (message ID or fact ID)
+
+
+TEST 11: Organizational Deep Dive
+Send:
 Walk me through everything we know about Project Phoenix, including ownership, billing work, meetings, and technical coordination.
+
+Features tested:
+  - Org-structure traversal (ownership → REPORTS_TO chain)
+  - Multi-team coordination facts
+  - Billing-related claims extraction
+  - Long-answer synthesis
+
+Info-icon checks:
+  ✓ answer_payload.mode = "long"
+  ✓ evidence_refs includes REPORTS_TO facts + TASK_ASSIGNMENT + MEETING_EVENT
+  ✓ Display names for all people and teams (ownership shown by name, not ID)
+  ✓ hop_count 3+ (org chain + meetings + tasks)
+  ✓ path_summary shows organizational hierarchy traversal
+
+
+================================================================================
+MANUAL TESTING CHECKLIST (Info-Icon Quick Reference)
+================================================================================
+
+For EVERY SAGE answer, click the ℹ️ info icon and verify:
+
+ALWAYS PRESENT:
+  ☐ answer_payload.schema_version (should be 1)
+  ☐ answer_payload.mode ("short" or "long")
+  ☐ answer_payload.reason_code (e.g., "direct_lookup", "explicit_long", "fallback_invalid_json")
+  ☐ answer_payload.summary (text of response)
+  ☐ answer_payload.bullets (list of details) OR empty list []
+  ☐ answer_payload.explanation (why SAGE chose this mode)
+  ☐ evidence_refs (list of "fact:FACT_ID" or "chunk:CHUNK_ID")
+
+FOR GROUNDING (pronouns, people, dates):
+  ☐ grounding.references list shows all resolved pronouns/names
+    - "I" → your_user_id or display name (NOT raw UUID)
+    - "you" → recipient or display name
+    - "Rohan" → "Rohan" (display name visible, ideally with entity_id in tooltip)
+  ☐ grounding.temporal_expressions (list of raw temporal phrases, e.g., ["6pm", "tomorrow"])
+  ☐ Temporal_start normalized to ISO format (e.g., "2026-04-13T10:00:00+00:00")
+
+FOR PATHS & HOP TRACKING (multi-hop queries):
+  ☐ hop_count visible (should be >1 for complex queries)
+  ☐ path_summary or relationships showing the edge chain
+  ☐ Each relationship shows: source_node → edge_type → target_node
+
+FOR SUPERSESSION (corrections & updates):
+  ☐ If a fact was updated: see PRIOR fact (status: SUPERSEDED) and CURRENT fact
+  ☐ Reason for supersession visible (e.g., "Correction posted 2026-04-13")
+
+FOR LONG MODE:
+  ☐ answer_payload.mode = "long"
+  ☐ reason_code = "explicit_long" (user asked for detail)
+  ☐ explanation clearly states why long mode was triggered
+  ☐ bullets populated with structured details (not just 1 bullet)
+
+FOR PREVIEW CLAIMS (SAIA disabled/skipped):
+  ☐ If SAIA processing disabled: saia_status = "disabled"
+  ☐ preview_claims populated (tentative extractions shown for reference)
+  ☐ Clearly labeled: "PREVIEW ONLY - Not canonicalized" or similar

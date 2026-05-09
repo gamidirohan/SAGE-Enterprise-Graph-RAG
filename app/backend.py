@@ -25,12 +25,14 @@ from pydantic import BaseModel, Field
 try:
     import app.agentic as agentic
     import app.chat_store as chat_store
+    import app.document_ingestion as document_ingestion
     import app.saia as saia
     import app.services as services
     import app.utils as utils
 except ImportError:
     import agentic
     import chat_store
+    import document_ingestion
     import saia
     import services
     import utils
@@ -154,6 +156,7 @@ class DocumentProcessResponse(BaseModel):
     subject: str
     success: bool
     message: str
+    already_exists: bool = False
     warnings: List[str] = Field(default_factory=list)
     saia_status: Optional[str] = None
     saia_last_error: Optional[str] = None
@@ -775,6 +778,7 @@ async def process_document(
             if normalized_linked_message_id
             else content_hash
         )
+        already_exists = document_ingestion.document_exists(doc_id)
         payload = _build_document_payload(
             doc_id=doc_id,
             content=content,
@@ -793,38 +797,57 @@ async def process_document(
             linked_message_id=normalized_linked_message_id,
         )
 
-        if not store_in_neo4j(payload):
-            raise HTTPException(status_code=500, detail="Failed to store document in the graph database.")
-
         warnings: List[str] = []
         saia_status = "disabled" if not saia.is_enabled() else "not_processed"
         saia_last_error: Optional[str] = None
+        message = "Document already exists in the graph database. Skipping duplicate ingestion."
 
-        if payload["source"] == "message_attachment" and normalized_linked_message_id:
+        if not already_exists:
+            if not store_in_neo4j(payload):
+                raise HTTPException(status_code=500, detail="Failed to store document in the graph database.")
+            message = "Document processed and stored in the graph database."
+
             try:
-                saia_result = saia.process_message_attachment(
-                    doc_id=payload["doc_id"],
-                    linked_message_id=normalized_linked_message_id,
-                    sender_id=payload["sender"],
-                    receiver_ids=payload["receivers"],
-                    conversation_id=payload["conversation_id"],
-                    conversation_type=payload["conversation_type"],
-                    group_id=payload["group_id"],
-                    sent_at=payload["timestamp"],
-                    content=payload["content"],
-                    source=payload["source"],
-                    attachment_name=payload["attachment_name"],
-                )
+                if payload["source"] == "message_attachment" and normalized_linked_message_id:
+                    saia_result = saia.process_message_attachment(
+                        doc_id=payload["doc_id"],
+                        linked_message_id=normalized_linked_message_id,
+                        sender_id=payload["sender"],
+                        receiver_ids=payload["receivers"],
+                        conversation_id=payload["conversation_id"],
+                        conversation_type=payload["conversation_type"],
+                        group_id=payload["group_id"],
+                        sent_at=payload["timestamp"],
+                        content=payload["content"],
+                        source=payload["source"],
+                        attachment_name=payload["attachment_name"],
+                    )
+                else:
+                    saia_result = saia.process_document_upload(
+                        doc_id=payload["doc_id"],
+                        sender_id=payload["sender"],
+                        receiver_ids=payload["receivers"],
+                        conversation_id=payload["conversation_id"],
+                        conversation_type=payload["conversation_type"],
+                        group_id=payload["group_id"],
+                        sent_at=payload["timestamp"],
+                        content=payload["content"],
+                        source=payload["source"],
+                        attachment_name=payload["attachment_name"],
+                    )
                 saia_status = _normalize_saia_status((saia_result or {}).get("status"))
                 saia_last_error = (saia_result or {}).get("reason")
             except Exception as exc:  # pragma: no cover - defensive
-                logger.error("SAIA processing failed for attachment %s: %s", payload["doc_id"], exc)
+                logger.error("SAIA processing failed for upload %s: %s", payload["doc_id"], exc)
                 saia_status = "failed"
                 saia_last_error = str(exc)
 
             warning_message = _saia_warning_message(saia_status, saia_last_error)
             if warning_message:
                 warnings.append(warning_message)
+        elif saia.is_enabled():
+            saia_status = "already_ingested"
+            warnings.append("This document hash already exists, so the upload was skipped and SAIA was not re-run.")
 
         return {
             "doc_id": payload["doc_id"],
@@ -832,7 +855,8 @@ async def process_document(
             "receivers": payload["receivers"],
             "subject": payload["subject"],
             "success": True,
-            "message": "Document processed and stored in the graph database.",
+            "message": message,
+            "already_exists": already_exists,
             "warnings": warnings,
             "saia_status": saia_status,
             "saia_last_error": saia_last_error,
