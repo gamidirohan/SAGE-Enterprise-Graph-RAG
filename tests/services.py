@@ -194,7 +194,6 @@ REASON_CODE_DIRECT_LOOKUP = "direct_lookup"
 REASON_CODE_BROAD_OR_EXPLANATORY = "broad_or_explanatory"
 REASON_CODE_EVIDENCE_COMPLEXITY = "evidence_complexity"
 REASON_CODE_FALLBACK_INVALID_JSON = "fallback_invalid_json"
-REASON_CODE_VERBATIM_EVIDENCE = "verbatim_evidence"
 
 SHORT_OVERRIDE_PHRASES = (
     "brief",
@@ -225,22 +224,6 @@ BROAD_SCOPE_PHRASES = (
     "walk me through",
     "all dashboard-related conversations",
     "everything we know",
-)
-
-BASIC_VERBATIM_PHRASES = (
-    "print whatever it was in the chat",
-    "print whatever it was",
-    "just print",
-    "show the chat",
-    "show me the chat",
-    "show the message",
-    "show me the message",
-    "quote the chat",
-    "quote the message",
-    "verbatim",
-    "exact wording",
-    "exact text",
-    "copy paste",
 )
 DIRECT_LOOKUP_PREFIX = re.compile(r"^\s*(who|whom|what|when|which|did|do|does|is|are|was|were|am|can)\b", re.IGNORECASE)
 QUERY_NAME_PATTERN = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b")
@@ -446,29 +429,6 @@ def _contains_phrase(text: str, phrases: tuple[str, ...]) -> bool:
     return any(phrase in normalized for phrase in phrases)
 
 
-def _wants_verbatim_evidence(text: str) -> bool:
-    normalized = _normalize_query_text(text)
-    return _contains_phrase(normalized, BASIC_VERBATIM_PHRASES)
-
-
-def _extract_verbatim_chat_excerpts(retrieval_trace: Optional[Dict[str, Any]] = None, limit: int = 5) -> List[str]:
-    excerpts: List[str] = []
-    seen: set[str] = set()
-    for item in (retrieval_trace or {}).get("evidence") or []:
-        document = item.get("document") or {}
-        content = document.get("content")
-        if not content:
-            continue
-        text = " ".join(str(content).split()).strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        excerpts.append(text)
-        if len(excerpts) >= limit:
-            break
-    return excerpts
-
-
 def _looks_like_task_lookup(text: str) -> bool:
     lowered = text.lower()
     if not TASK_LOOKUP_PATTERN.search(text):
@@ -564,8 +524,6 @@ def _build_answer_explanation(mode: str, reason_code: str) -> str:
         return "SAGE used a longer answer because the retrieved evidence spans multiple items or hops."
     if reason_code == REASON_CODE_FALLBACK_INVALID_JSON:
         return "SAGE returned a safe short answer because the detailed response could not be formatted reliably."
-    if reason_code == REASON_CODE_VERBATIM_EVIDENCE:
-        return "SAGE returned verbatim chat evidence because you asked to see the exact wording."
     if mode == ANSWER_MODE_SHORT:
         return "SAGE kept this answer short because the question looks like a narrow lookup with a direct answer."
     return "SAGE used a longer answer because extra detail helps explain the available evidence."
@@ -1288,7 +1246,6 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                         "sender": supporting_document.get("sender"),
                         "timestamp": supporting_document.get("timestamp"),
                         "source": supporting_document.get("source"),
-                        "content": _preview_trace_content(supporting_document.get("content")),
                         "conversation_type": supporting_document.get("conversation_type"),
                         "conversation_id": supporting_document.get("conversation_id"),
                         "group_id": supporting_document.get("group_id"),
@@ -1381,7 +1338,6 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                     "sender": sender,
                     "timestamp": document.get("timestamp"),
                     "source": document.get("source"),
-                    "content": _preview_trace_content(document.get("content")),
                     "conversation_type": document.get("conversation_type"),
                     "conversation_id": document.get("conversation_id"),
                     "group_id": document.get("group_id"),
@@ -1473,27 +1429,6 @@ def generate_groq_response(
                 "Would you like to ask about something else or perhaps upload a document with this information?"
             ),
             bullets=[],
-            retrieval_trace=retrieval_trace,
-        )
-        return {
-            "answer": answer_payload["summary"],
-            "answer_payload": answer_payload,
-            "thinking": [],
-        }
-
-    if _wants_verbatim_evidence(query):
-        excerpts = _extract_verbatim_chat_excerpts(retrieval_trace)
-        if excerpts:
-            summary = excerpts[0]
-            bullets = excerpts[1:]
-        else:
-            summary = "I couldn't find any retrieved chat text to quote verbatim."
-            bullets = []
-        answer_payload = _build_answer_payload(
-            mode=ANSWER_MODE_SHORT,
-            reason_code=REASON_CODE_VERBATIM_EVIDENCE,
-            summary=summary,
-            bullets=bullets,
             retrieval_trace=retrieval_trace,
         )
         return {
@@ -1622,25 +1557,6 @@ def _summarize_with_optional_llm(llm, text: str) -> str:
 
 _SHORT_CONTENT_CHAR_LIMIT = 500
 _SHORT_CONTENT_WORD_LIMIT = 200
-
-_TRACE_EVIDENCE_CONTENT_LIMIT = 800
-
-
-def _preview_trace_content(value: Any, limit: int = _TRACE_EVIDENCE_CONTENT_LIMIT) -> Optional[str]:
-    """Return a safe-to-display content preview for trace evidence.
-
-    Chat messages are typically short and will pass through unchanged.
-    Uploaded documents can be very large, so we cap the preview to keep
-    UI payloads reasonable.
-    """
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "…"
 
 
 def _document_exists(session, doc_id: str) -> bool:

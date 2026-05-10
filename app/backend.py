@@ -196,6 +196,15 @@ class GraphSubgraphResponse(BaseModel):
     relationships: List[GraphPathRelationship] = Field(default_factory=list)
 
 
+class DocumentDebugResponse(BaseModel):
+    doc_id: str
+    subject: Optional[str] = None
+    sender: Optional[str] = None
+    timestamp: Optional[str] = None
+    source: Optional[str] = None
+    content: Optional[str] = None
+
+
 class UserSyncRequest(BaseModel):
     id: str
     name: str
@@ -1236,6 +1245,63 @@ async def debug_subgraph_endpoint(
     except Exception as exc:
         logger.error("Debug subgraph failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Failed to load subgraph: {exc}") from exc
+    finally:
+        driver.close()
+
+
+@app.get("/api/debug-document", response_model=DocumentDebugResponse)
+async def debug_document_endpoint(doc_id: str):
+    """Return a document (including content) by doc_id for UI debug/provenance.
+
+    This endpoint exists primarily to backfill older saved traces that did not
+    persist document content inside the evidence bundle.
+    """
+
+    normalized = (doc_id or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="doc_id is required")
+
+    driver = utils.create_neo4j_driver()
+    try:
+        with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
+            rows = session.run(
+                """
+                MATCH (d:Document {doc_id: $doc_id})
+                RETURN d AS d
+                LIMIT 1
+                """,
+                doc_id=normalized,
+            ).data()
+            if not rows:
+                raise HTTPException(status_code=404, detail="Document not found")
+
+            node = rows[0].get("d")
+            props: Dict[str, Any]
+            try:
+                props = dict(node.items()) if node is not None else {}
+            except Exception:
+                props = {}
+
+            # Avoid accidentally returning massive payloads.
+            content_value = props.get("content")
+            if isinstance(content_value, str) and len(content_value) > 10000:
+                content_value = content_value[:10000].rstrip() + "…"
+
+            return DocumentDebugResponse(
+                doc_id=str(props.get("doc_id") or normalized),
+                subject=props.get("subject"),
+                sender=props.get("sender"),
+                timestamp=props.get("timestamp"),
+                source=props.get("source"),
+                content=content_value if isinstance(content_value, str) else None,
+            )
+    except HTTPException:
+        raise
+    except (ServiceUnavailable, SessionExpired) as exc:
+        _raise_graph_unavailable("inspecting a document", exc)
+    except Exception as exc:
+        logger.error("Debug document fetch failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch document: {exc}") from exc
     finally:
         driver.close()
 
