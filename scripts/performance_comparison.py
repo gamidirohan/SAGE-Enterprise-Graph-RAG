@@ -1422,7 +1422,7 @@ def main():
     if args.process_messages:
         logger.warning(
             "The legacy message_processor workflow was removed. "
-            "Use `uv run streamlit run app/pipeline.py` and the Messages tab for ingestion."
+            "Use `uv run streamlit run scripts/pipeline.py` and the Messages tab for ingestion."
         )
 
     # Generate QA pairs if requested

@@ -192,7 +192,10 @@ def expand_retrieval_context(
     result["trace"]["selector_strategy"] = "graph"
     return result
 
-
+    # 'validate_trace_paths': G- CT (Graph Constrained Chain of Thought): 
+    # Validate evidence has valid graph/fact bindings and sufficient provenance 
+    #   for grounding, attribution, and determining if additional retrieval is needed.
+    
 def validate_trace_paths(trace: Dict[str, Any] | None) -> Dict[str, Any]:
     evidence = list((trace or {}).get("evidence") or [])
     validated = 0

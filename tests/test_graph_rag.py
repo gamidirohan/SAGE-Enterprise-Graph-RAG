@@ -50,9 +50,9 @@ def _build_fake_streamlit():
 def _import_graph_rag(monkeypatch):
     fake_streamlit = _build_fake_streamlit()
     monkeypatch.setitem(sys.modules, "streamlit", fake_streamlit)
-    if "app.graph_rag" in sys.modules:
-        del sys.modules["app.graph_rag"]
-    module = importlib.import_module("app.graph_rag")
+    if "scripts.graph_rag" in sys.modules:
+        del sys.modules["scripts.graph_rag"]
+    module = importlib.import_module("scripts.graph_rag")
     return module, fake_streamlit
 
 

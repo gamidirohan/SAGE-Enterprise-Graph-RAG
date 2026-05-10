@@ -23,7 +23,7 @@ The system loops, thinks, checks itself, and proves its answers using:
 ## Current System (Quick Summary)
 
 - Retrieval and chat:
-  - Streamlit UI and graph cosine similarity in [graph_rag.py](graph_rag.py)
+  - Streamlit UI and graph cosine similarity in [scripts/graph_rag.py](../scripts/graph_rag.py)
   - LLM generation via Groq; uses chunk summaries and cosine similarity over stored embeddings
 - Ingestion and graph population:
   - Document/message processing and chunking into Neo4j in [scripts/pipeline.py](../scripts/pipeline.py)
@@ -188,7 +188,7 @@ Agents (roles):
 - Generator: synthesize answer + provenance
 - Critic/Safety: verify grounding, citations, policies; trigger retries if weak
 
-Implementation note: Keep existing endpoints intact; add an `agentic_mode` toggle wired through [backend.py](backend.py) and [graph_rag.py](graph_rag.py).
+Implementation note: Keep existing endpoints intact; add an `agentic_mode` toggle wired through [backend.py](backend.py) and [scripts/graph_rag.py](../scripts/graph_rag.py).
 
 ---
 
@@ -315,7 +315,7 @@ Keep classic Graph RAG intact; add a toggle:
 ```
 agentic_mode = true | false
 ```
-- `false` → existing flow in [graph_rag.py](graph_rag.py) / [backend.py](backend.py)
+- `false` → existing flow in [scripts/graph_rag.py](../scripts/graph_rag.py) / [backend.py](backend.py)
 - `true` → route to orchestrator loop (LangGraph/AutoGen), with fallback to classic if weak/failed
 
 ---
@@ -372,7 +372,7 @@ Backend:
 - Toggle in request body: `{ agentic_mode: true }`
 
 Streamlit:
-- Add “Agent Mode” toggle in [graph_rag.py](graph_rag.py)
+- Add “Agent Mode” toggle in [scripts/graph_rag.py](../scripts/graph_rag.py)
 - Live panes for: planner steps, tool calls, validated paths, critic verdicts
 
 ---

@@ -20,7 +20,7 @@
   - LLMs used for summarization, structured extraction (JSON), and final generation using prompt templates.
 - **API & UI**
   - `backend.py`: FastAPI with endpoints `/api/chat`, `/api/process-document`, `/api/debug-graph`, `/api/health`.
-  - `graph_rag.py` and Streamlit apps for Chat UI and Document Processor UI.
+  - `scripts/graph_rag.py` and Streamlit apps for Chat UI and Document Processor UI.
 - **Evaluation & Reporting**
   - `scripts/performance_comparison.py`: multi-model evaluation harness (quality, latency, preference, similarity).
   - `scripts/generate_report.py`: HTML report generator, plots, and CSV outputs.
@@ -41,7 +41,7 @@
 ## 📁 Notable Files (Quick Map)
 
 - `backend.py` — FastAPI server, ingestion, query, Groq response pipeline.
-- `graph_rag.py` — Streamlit chat interface + query pipeline.
+- `scripts/graph_rag.py` — Streamlit chat interface + query pipeline.
 - `scripts/pipeline.py` — Document ingestion, entity extraction, chunking (also used in the UI variant in `data/documents_ui/`).
 - `scripts/message_processor.py` — Message ingestion and QA pair generation.
 - `scripts/performance_comparison.py` — Evaluation harness and metrics.

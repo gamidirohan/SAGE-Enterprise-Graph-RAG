@@ -49,7 +49,7 @@ This creates a clean and defensible split:
 ### A. Ingestion pipeline
 Implemented in active code paths:
 - `app/backend.py`
-- `app/pipeline.py`
+- `scripts/pipeline.py`
 - `app/services.py`
 - `app/utils.py`
 
@@ -66,7 +66,7 @@ Current capabilities:
 Implemented in active code paths:
 - `app/services.py`
 - `app/backend.py`
-- `app/graph_rag.py`
+- `scripts/graph_rag.py`
 
 Current capabilities:
 - dense semantic retrieval over chunk embeddings using Neo4j cosine similarity

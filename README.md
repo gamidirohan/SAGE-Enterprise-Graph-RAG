@@ -86,7 +86,7 @@ Important note:
 ### 1) Streamlit Chat Interface
 
 ```bash
-uv run streamlit run app/pipeline.py
+uv run streamlit run scripts/pipeline.py
 ```
 
 Default URL: `http://localhost:8501`
@@ -173,7 +173,7 @@ Notes:
 
 ## Single Streamlit App
 
-`app/pipeline.py` now contains the Streamlit chat, document processing, and message-ingestion flows in one place.
+`scripts/pipeline.py` now contains the Streamlit chat, document processing, and message-ingestion flows in one place.
 
 ## Scripts
 
@@ -205,7 +205,7 @@ Useful verification commands:
 
 ```bash
 uv run pytest
-uv run python -m py_compile app/backend.py app/chat_store.py app/services.py app/utils.py app/pipeline.py
+uv run python -m py_compile app/backend.py app/chat_store.py app/services.py app/utils.py scripts/pipeline.py scripts/graph_rag.py
 ```
 
 Frontend verification:
