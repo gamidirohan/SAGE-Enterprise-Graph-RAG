@@ -748,6 +748,14 @@ def _fact_visible_summary(item: Dict[str, Any]) -> str:
     )
 
 
+def _fact_conflict_summary(query_type: str, claim_type: str) -> str:
+    if claim_type == "REPORTS_TO" or query_type == "person_lookup":
+        return "I found conflicting current reporting relationships for that lookup, so I can't collapse them to one safely."
+    if query_type == "schedule_or_timeline":
+        return "I found conflicting current schedule evidence for that lookup, so I can't collapse it to one safely."
+    return "I found conflicting current evidence for that lookup, so I can't collapse it to one safely."
+
+
 def _build_fact_backed_answer(
     query: str,
     *,
@@ -757,13 +765,40 @@ def _build_fact_backed_answer(
 ) -> Optional[Dict[str, Any]]:
     trace = dict(retrieval_trace or {})
     query_type = str(trace.get("query_type") or "").strip()
+    query_profile = dict(trace.get("query_profile") or {})
     evidence = [dict(item) for item in (trace.get("evidence") or []) if isinstance(item, dict)]
     fact_items = [item for item in evidence if item.get("fact_id")]
 
-    if query_type not in FACT_PRIORITY_QUERY_TYPES or not fact_items:
+    if query_type not in FACT_PRIORITY_QUERY_TYPES and query_type != "person_lookup":
+        return None
+    if not fact_items:
         return None
 
+    fact_conflict = dict(trace.get("fact_lookup_conflict") or {})
     ambiguity = dict(trace.get("task_lookup_ambiguity") or {})
+    if fact_conflict.get("ambiguous"):
+        summaries = [_fact_visible_summary(item) for item in fact_items[:3]]
+        summaries = [summary for summary in summaries if summary]
+        if not summaries:
+            summaries = ["I found multiple current facts that conflict for this lookup."]
+        claim_type = str(
+            fact_conflict.get("claim_type")
+            or ((fact_items[0].get("fact") or {}).get("claim_type"))
+            or ""
+        )
+        answer_payload = _build_answer_payload(
+            mode=mode,
+            reason_code=reason_code,
+            summary=_fact_conflict_summary(query_type, claim_type),
+            bullets=summaries,
+            retrieval_trace=trace,
+        )
+        return {
+            "answer": answer_payload["summary"],
+            "answer_payload": answer_payload,
+            "thinking": [],
+        }
+
     if query_type == "task_commitment_lookup" and ambiguity.get("ambiguous"):
         summaries = [_fact_visible_summary(item) for item in fact_items[:3]]
         summaries = [summary for summary in summaries if summary]
@@ -812,6 +847,25 @@ def _build_fact_backed_answer(
             else visible_summary
             or "I found a matching schedule fact, but it does not include a time."
         )
+        answer_payload = _build_answer_payload(
+            mode=mode,
+            reason_code=reason_code,
+            summary=summary,
+            bullets=[],
+            retrieval_trace=trace,
+        )
+        return {
+            "answer": answer_payload["summary"],
+            "answer_payload": answer_payload,
+            "thinking": [],
+        }
+
+    if (
+        query_type == "person_lookup"
+        and not query_profile.get("wants_list_format")
+        and str(((top_fact.get("fact") or {}).get("claim_type")) or "") == "REPORTS_TO"
+    ):
+        summary = visible_summary or "I found a current reporting relationship, but I could not render it clearly."
         answer_payload = _build_answer_payload(
             mode=mode,
             reason_code=reason_code,
@@ -1220,16 +1274,18 @@ def _prepare_fact_result(
 ) -> Dict[str, Any]:
     ranked = dict(row)
     fact = _serialize_neo4j_entity(row.get("f"))
+    claim_type = str(fact.get("claim_type") or "")
     similarity = float(row.get("similarity", 0) or 0)
     recency_boost = _compute_recency_rank_boost(row)
     rank_score = similarity
     focus_score = _focus_match_score(row, list(focus_terms or []))
+    fact_priority = bool(query_type in FACT_PRIORITY_QUERY_TYPES and claim_type in TASK_LIKE_FACT_TYPES)
 
     if fact.get("status") == "current":
         rank_score += 0.05
     if exact_match:
         rank_score += 0.75
-    if query_type in FACT_PRIORITY_QUERY_TYPES and fact.get("claim_type") in TASK_LIKE_FACT_TYPES:
+    if fact_priority:
         rank_score += 0.35
     if personalized_lookup:
         subject_candidate = fact.get("subject_entity_id") or fact.get("subject_key")
@@ -1240,12 +1296,15 @@ def _prepare_fact_result(
             rank_score += 0.1
     if focus_score:
         rank_score += 0.35 * focus_score
-    if reports_to_lookup and fact.get("claim_type") == "REPORTS_TO":
+    if reports_to_lookup and claim_type == "REPORTS_TO":
         rank_score += 0.4
+        if query_type == "person_lookup":
+            fact_priority = True
+            rank_score += 0.25
     rank_score += recency_boost
 
     ranked["exact_match"] = bool(exact_match)
-    ranked["fact_priority"] = bool(query_type in FACT_PRIORITY_QUERY_TYPES and fact.get("claim_type") in TASK_LIKE_FACT_TYPES)
+    ranked["fact_priority"] = fact_priority
     ranked["focus_match_score"] = focus_score
     ranked["recency_boost"] = recency_boost
     ranked["rank_score"] = rank_score
@@ -1267,9 +1326,20 @@ def _combine_ranked_results(
     *,
     query_type: str,
     focus_terms: Optional[List[str]] = None,
+    reports_to_lookup: bool = False,
     limit: int = 5,
 ) -> List[Dict[str, Any]]:
     if query_type in FACT_PRIORITY_QUERY_TYPES and fact_results:
+        combined = fact_results[:limit]
+        remaining = max(limit - len(combined), 0)
+        if remaining:
+            combined.extend(vector_results[:remaining])
+        return combined[:limit]
+    if (
+        query_type == "person_lookup"
+        and reports_to_lookup
+        and any(str((item.get("f") or item.get("fact") or {}).get("claim_type") or "") == "REPORTS_TO" for item in fact_results)
+    ):
         combined = fact_results[:limit]
         remaining = max(limit - len(combined), 0)
         if remaining:
@@ -1505,6 +1575,7 @@ def query_graph_with_trace(
             fact_results,
             query_type=query_type,
             focus_terms=focus_terms,
+            reports_to_lookup=reports_to_lookup,
             limit=5,
         )
         evidence: List[Dict[str, Any]] = []

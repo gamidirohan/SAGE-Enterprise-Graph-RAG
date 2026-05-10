@@ -211,6 +211,69 @@ def _sort_key(item: Dict[str, Any], *, query_type: str, score_field: str) -> Tup
     )
 
 
+def _is_reports_to_fact(item: Dict[str, Any]) -> bool:
+    return bool(
+        item.get("fact_id")
+        and str((item.get("fact") or {}).get("claim_type") or "") == "REPORTS_TO"
+    )
+
+
+def _current_fact_value_signature(item: Dict[str, Any]) -> Tuple[str, ...]:
+    fact = item.get("fact") or {}
+    return (
+        str(fact.get("claim_type") or ""),
+        str(fact.get("subject_entity_id") or fact.get("subject_key") or ""),
+        str(fact.get("object_entity_id") or fact.get("object_key") or ""),
+        str(fact.get("temporal_start") or ""),
+        str(fact.get("temporal_end") or ""),
+        str(fact.get("value_text") or ""),
+    )
+
+
+def _detect_fact_lookup_conflict(
+    items: List[Dict[str, Any]],
+    *,
+    query_type: str,
+    query_profile: Dict[str, Any],
+) -> Dict[str, Any]:
+    if query_profile.get("wants_list_format"):
+        return {"ambiguous": False}
+    if query_type not in {"task_commitment_lookup", "schedule_or_timeline", "person_lookup"}:
+        return {"ambiguous": False}
+
+    current_facts = [
+        item
+        for item in items
+        if item.get("fact_id") and str((item.get("fact") or {}).get("status") or "").lower() == "current"
+    ]
+    if len(current_facts) < 2:
+        return {"ambiguous": False}
+
+    by_canonical_key: Dict[str, List[Dict[str, Any]]] = {}
+    for item in current_facts:
+        fact = item.get("fact") or {}
+        canonical_key = str(fact.get("canonical_key") or "").strip()
+        if not canonical_key:
+            canonical_key = "|".join(_current_fact_value_signature(item)[:2])
+        by_canonical_key.setdefault(canonical_key, []).append(item)
+
+    for canonical_key, candidates in by_canonical_key.items():
+        if len(candidates) < 2:
+            continue
+        value_signatures = {_current_fact_value_signature(item) for item in candidates}
+        if len(value_signatures) > 1:
+            claim_type = str((candidates[0].get("fact") or {}).get("claim_type") or "")
+            return {
+                "ambiguous": True,
+                "canonical_key": canonical_key,
+                "candidate_count": len(candidates),
+                "claim_type": claim_type,
+                "reason": "conflicting_current_facts",
+            }
+
+    return {"ambiguous": False}
+
+
 def _task_signature(item: Dict[str, Any]) -> str:
     fact = item.get("fact") or {}
     canonical_key = str(fact.get("canonical_key") or "").strip()
@@ -267,6 +330,27 @@ def _detect_task_lookup_ambiguity(items: List[Dict[str, Any]], *, query_type: st
             }
 
     return {"ambiguous": False}
+
+
+def _apply_lookup_conflicts(
+    items: List[Dict[str, Any]],
+    *,
+    top_k: int,
+    query_type: str,
+    query_profile: Dict[str, Any],
+) -> Tuple[int, Dict[str, Any], Dict[str, Any]]:
+    task_ambiguity = _detect_task_lookup_ambiguity(items, query_type=query_type)
+    fact_conflict = _detect_fact_lookup_conflict(
+        items,
+        query_type=query_type,
+        query_profile=query_profile,
+    )
+
+    for signal in (task_ambiguity, fact_conflict):
+        if signal.get("ambiguous"):
+            top_k = min(max(top_k, int(signal.get("candidate_count") or 2)), len(items), 3)
+
+    return top_k, task_ambiguity, fact_conflict
 
 
 def _score_evidence(query: str, evidence: List[Dict[str, Any]], *, query_type: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -334,11 +418,16 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
     if query_type in {"task_commitment_lookup", "schedule_or_timeline"} and not query_profile.get("wants_list_format"):
         if any(item.get("fact_id") for item in evidence):
             top_k = 1
+    if query_type == "person_lookup" and not query_profile.get("wants_list_format"):
+        if any(_is_reports_to_fact(item) for item in evidence):
+            top_k = 1
 
     if not evidence:
         reranked_trace["evidence"] = []
         reranked_trace["reranked"] = False
         reranked_trace["query_profile"] = query_profile
+        reranked_trace["task_lookup_ambiguity"] = {"ambiguous": False}
+        reranked_trace["fact_lookup_conflict"] = {"ambiguous": False}
         reranked_trace["reranker"] = {
             "enabled": False,
             "method": "none",
@@ -349,9 +438,12 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
 
     if not query:
         evidence.sort(key=lambda item: _sort_key(item, query_type=query_type, score_field="rank_score"), reverse=True)
-        ambiguity = _detect_task_lookup_ambiguity(evidence, query_type=query_type)
-        if ambiguity.get("ambiguous"):
-            top_k = min(max(top_k, int(ambiguity.get("candidate_count") or 2)), len(evidence), 3)
+        top_k, task_ambiguity, fact_conflict = _apply_lookup_conflicts(
+            evidence,
+            top_k=top_k,
+            query_type=query_type,
+            query_profile=query_profile,
+        )
         selected, distinct_candidates = _select_diverse_evidence(
             evidence,
             top_k=min(top_k, len(evidence)),
@@ -360,7 +452,8 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
         reranked_trace["query_profile"] = query_profile
         reranked_trace["result_count"] = len(selected)
         reranked_trace["reranked"] = True
-        reranked_trace["task_lookup_ambiguity"] = ambiguity
+        reranked_trace["task_lookup_ambiguity"] = task_ambiguity
+        reranked_trace["fact_lookup_conflict"] = fact_conflict
         reranked_trace["reranker"] = {
             "enabled": False,
             "method": "score_sort",
@@ -374,9 +467,12 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
         scored, metadata = _score_evidence(query, evidence, query_type=query_type)
     except Exception:
         evidence.sort(key=lambda item: _sort_key(item, query_type=query_type, score_field="rank_score"), reverse=True)
-        ambiguity = _detect_task_lookup_ambiguity(evidence, query_type=query_type)
-        if ambiguity.get("ambiguous"):
-            top_k = min(max(top_k, int(ambiguity.get("candidate_count") or 2)), len(evidence), 3)
+        top_k, task_ambiguity, fact_conflict = _apply_lookup_conflicts(
+            evidence,
+            top_k=top_k,
+            query_type=query_type,
+            query_profile=query_profile,
+        )
         selected, distinct_candidates = _select_diverse_evidence(
             evidence,
             top_k=min(top_k, len(evidence)),
@@ -389,7 +485,8 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
         reranked_trace["evidence_state"] = "no_evidence" if not selected else "partial_evidence" if len(selected) < 2 else "grounded"
         reranked_trace["reranked"] = False
         reranked_trace["query_profile"] = query_profile
-        reranked_trace["task_lookup_ambiguity"] = ambiguity
+        reranked_trace["task_lookup_ambiguity"] = task_ambiguity
+        reranked_trace["fact_lookup_conflict"] = fact_conflict
         reranked_trace["reranker"] = {
             "enabled": False,
             "method": "unavailable",
@@ -400,9 +497,12 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
         }
         return {"documents": _unique_documents(selected), "trace": reranked_trace}
 
-    ambiguity = _detect_task_lookup_ambiguity(scored, query_type=query_type)
-    if ambiguity.get("ambiguous"):
-        top_k = min(max(top_k, int(ambiguity.get("candidate_count") or 2)), len(scored), 3)
+    top_k, task_ambiguity, fact_conflict = _apply_lookup_conflicts(
+        scored,
+        top_k=top_k,
+        query_type=query_type,
+        query_profile=query_profile,
+    )
     selected, distinct_candidates = _select_diverse_evidence(scored, top_k=min(top_k, len(scored)))
 
     reranked_trace["evidence"] = selected
@@ -413,7 +513,8 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
     reranked_trace["evidence_state"] = "no_evidence" if not selected else "partial_evidence" if len(selected) < 2 else "grounded"
     reranked_trace["reranked"] = True
     reranked_trace["query_profile"] = query_profile
-    reranked_trace["task_lookup_ambiguity"] = ambiguity
+    reranked_trace["task_lookup_ambiguity"] = task_ambiguity
+    reranked_trace["fact_lookup_conflict"] = fact_conflict
     reranked_trace["reranker"] = {
         "enabled": True,
         "method": metadata["method"],

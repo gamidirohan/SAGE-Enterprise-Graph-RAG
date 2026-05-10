@@ -541,6 +541,9 @@ def _extract_manager_claims(sentence: str, context: GroundingContext, session: A
 
     manager_text = _normalize_whitespace(match.group("manager"))
     employee_text = _normalize_whitespace(match.group("employee") or "")
+    # Remove stray temporal tokens that can confuse resolution (e.g., "Vinitha now").
+    manager_text = re.sub(r"\bfrom\s+now\s+on\b|\bnow\b", "", manager_text, flags=re.IGNORECASE).strip()
+    employee_text = re.sub(r"\bfrom\s+now\s+on\b|\bnow\b", "", employee_text, flags=re.IGNORECASE).strip()
     manager_lower = manager_text.lower()
     lowered_sentence = sentence.lower()
 
@@ -894,8 +897,15 @@ def should_promote_claim(claim: Dict[str, Any]) -> bool:
         return False
     if claim.get("resolution_status") != "resolved":
         return False
-    if float(claim.get("canonical_confidence") or 0.0) < MIN_CANONICAL_CONFIDENCE:
-        return False
+    # Allow slightly lower canonical confidence for deterministic extractions
+    # (they are rule-based and less likely to be hallucinated).
+    canonical_conf = float(claim.get("canonical_confidence") or 0.0)
+    if claim.get("extraction_source") == "deterministic":
+        if canonical_conf < max(0.60, MIN_CANONICAL_CONFIDENCE * 0.75):
+            return False
+    else:
+        if canonical_conf < MIN_CANONICAL_CONFIDENCE:
+            return False
     return True
 
 
@@ -1078,7 +1088,9 @@ def _extract_reports_to_claims(sentence: str, context: GroundingContext, session
 
     left = sentence[: relation_match.start()].strip(" ,.")
     right = sentence[relation_match.end() :].strip(" ,.")
-    left = re.sub(r"\bnow\b$", "", left, flags=re.IGNORECASE).strip(" ,.")
+    # Strip temporal noise like trailing/leading 'now' or 'from now on' which hinder name resolution.
+    left = re.sub(r"\bfrom\s+now\s+on\b|\bnow\b", "", left, flags=re.IGNORECASE).strip(" ,.")
+    right = re.sub(r"\bfrom\s+now\s+on\b|\bnow\b", "", right, flags=re.IGNORECASE).strip(" ,.")
     if not left or not right:
         return []
 
@@ -1624,7 +1636,10 @@ def _canonical_claim_intent_key(claim: Dict[str, Any]) -> Tuple[str, ...]:
 
 
 def _claim_candidate_score(claim: Dict[str, Any]) -> Tuple[int, int, float, float]:
-    deterministic_score = 1 if claim.get("extraction_source") == "deterministic" else 0
+    # Strongly prefer deterministic extractions over LLM candidates by
+    # amplifying the deterministic score. This helps avoid LLM-inverted
+    # parses winning when a deterministic parse exists.
+    deterministic_score = 100 if claim.get("extraction_source") == "deterministic" else 0
     temporal_score = 0 if claim.get("claim_type") == "REPORTS_TO" and claim.get("temporal_start") else 1
     return (
         deterministic_score,

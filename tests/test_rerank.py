@@ -136,6 +136,83 @@ def test_rerank_keeps_exact_fact_match_ahead_of_global_semantic_match(monkeypatc
     assert result["trace"]["evidence"][0]["fact_id"] == "fact-exact"
 
 
+def test_rerank_keeps_single_reports_to_fact_for_direct_person_lookup(monkeypatch):
+    trace = {
+        "query": "Who does Rohan report to?",
+        "query_type": "person_lookup",
+        "query_profile": {"wants_list_format": False},
+        "evidence": [
+            {
+                "chunk_id": "chunk-old",
+                "chunk_summary": "Rohan reports to Hrithik.",
+                "rank_score": 9.0,
+                "document": {"doc_id": "doc-old"},
+            },
+            {
+                "fact_id": "fact-current",
+                "fact_summary": "Rohan reports to Anil Fresh.",
+                "rank_score": 1.0,
+                "fact_priority": True,
+                "document": {"doc_id": "doc-current"},
+                "fact": {"claim_type": "REPORTS_TO", "canonical_key": "reports_to::rohan-id"},
+            },
+        ],
+    }
+    monkeypatch.setattr(rerank, "_cross_encoder_scores", lambda *_args, **_kwargs: ([9.0, 1.0], "fake"))
+
+    result = rerank.rerank([], trace)
+
+    assert len(result["trace"]["evidence"]) == 1
+    assert result["trace"]["evidence"][0]["fact_id"] == "fact-current"
+
+
+def test_rerank_keeps_conflicting_current_reports_to_facts(monkeypatch):
+    trace = {
+        "query": "Who does Rohan report to?",
+        "query_type": "person_lookup",
+        "query_profile": {"wants_list_format": False},
+        "evidence": [
+            {
+                "fact_id": "fact-anil",
+                "fact_summary": "Rohan reports to Anil Fresh.",
+                "rank_score": 9.0,
+                "document": {"doc_id": "doc-anil", "timestamp": "2099-05-10T08:00:00+00:00"},
+                "fact": {
+                    "claim_type": "REPORTS_TO",
+                    "canonical_key": "reports_to::rohan-id",
+                    "status": "current",
+                    "subject_entity_id": "rohan-id",
+                    "object_entity_id": "anil-id",
+                    "display_summary": "Rohan reports to Anil Fresh.",
+                    "last_seen_at": "2099-05-10T08:00:00+00:00",
+                },
+            },
+            {
+                "fact_id": "fact-hrithik",
+                "fact_summary": "Rohan reports to Hrithik.",
+                "rank_score": 8.5,
+                "document": {"doc_id": "doc-hrithik", "timestamp": "2099-05-10T08:30:00+00:00"},
+                "fact": {
+                    "claim_type": "REPORTS_TO",
+                    "canonical_key": "reports_to::rohan-id",
+                    "status": "current",
+                    "subject_entity_id": "rohan-id",
+                    "object_entity_id": "hrithik-id",
+                    "display_summary": "Rohan reports to Hrithik.",
+                    "last_seen_at": "2099-05-10T08:30:00+00:00",
+                },
+            },
+        ],
+    }
+    monkeypatch.setattr(rerank, "_cross_encoder_scores", lambda *_args, **_kwargs: ([9.0, 8.5], "fake"))
+
+    result = rerank.rerank([], trace)
+
+    assert result["trace"]["fact_lookup_conflict"]["ambiguous"] is True
+    assert result["trace"]["fact_lookup_conflict"]["claim_type"] == "REPORTS_TO"
+    assert {item["fact_id"] for item in result["trace"]["evidence"]} == {"fact-anil", "fact-hrithik"}
+
+
 def test_rerank_keeps_fact_priority_ahead_of_chunk(monkeypatch):
     trace = {
         "query": "When am I sending the Project Alpha budget now?",

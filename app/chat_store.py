@@ -403,13 +403,17 @@ def _is_graph_ineligible_message(
 ) -> bool:
     normalized_source = (source or "").strip().lower()
     normalized_conversation_type = (conversation_type or "").strip().lower()
-    if normalized_conversation_type == "sage":
-        return True
-    if sender_id == SAGE_USER_ID or receiver_id == SAGE_USER_ID:
+    # Skip messages authored by the SAGE bot itself, or synthetic sources.
+    # Allow human-authored messages directed at SAGE so they can be synced
+    # and used to update canonical facts (e.g., "Rohan now reports to Vinitha").
+    if sender_id == SAGE_USER_ID:
         return True
     if normalized_source.startswith("sage_"):
         return True
-    return bool(is_ai_response and sender_id == SAGE_USER_ID)
+    # If the message is an AI response produced by SAGE, skip it.
+    if is_ai_response and sender_id == SAGE_USER_ID:
+        return True
+    return False
 
 
 def _sync_message_to_graph(

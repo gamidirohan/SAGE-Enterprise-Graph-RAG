@@ -499,6 +499,54 @@ def test_query_graph_with_trace_filters_person_lookup_to_focus_entity(monkeypatc
     assert driver.closed is True
 
 
+def test_query_graph_with_trace_prioritizes_reports_to_fact_over_older_chunk(monkeypatch):
+    def handler(query, _params):
+        if "MATCH (c:Chunk)-[:PART_OF]->(d:Document)" in query:
+            return [
+                {
+                    "chunk_id": "chunk-rohan-old",
+                    "chunk_summary": "Rohan reports to Hrithik.",
+                    "d": {"doc_id": "chat-msg-rohan-old", "subject": "Chat message", "sender": "1"},
+                    "similarity": 0.97,
+                    "relationship": "PART_OF",
+                    "n": {"id": "7", "name": "Rohan", "_labels": ["Person"]},
+                }
+            ]
+        if "MATCH (f:CanonicalFact)" in query:
+            return [
+                {
+                    "fact_id": "fact-rohan-current",
+                    "fact_summary": "Rohan reports to Anil Fresh.",
+                    "f": {
+                        "fact_id": "fact-rohan-current",
+                        "canonical_key": "reports_to::rohan-id",
+                        "claim_type": "REPORTS_TO",
+                        "status": "current",
+                        "subject_key": "rohan-id",
+                        "subject_entity_id": "rohan-id",
+                        "object_key": "anil-id",
+                        "object_entity_id": "anil-id",
+                        "last_seen_at": "2026-05-10T10:00:00+00:00",
+                    },
+                    "d": {"doc_id": "chat-msg-rohan-current", "subject": "Chat message", "sender": "1", "source": "chat_message"},
+                    "similarity": 0.42,
+                }
+            ]
+        return []
+
+    session = _DispatchSession(handler)
+    driver = _Driver(session)
+
+    monkeypatch.setattr(services.utils, "create_neo4j_driver", lambda: driver)
+    monkeypatch.setattr(services.utils, "get_cached_embedding_model", lambda: _Model())
+
+    result = services.query_graph_with_trace("Who does Rohan report to?")
+
+    assert result["trace"]["query_type"] == "person_lookup"
+    assert result["trace"]["evidence"][0]["fact_id"] == "fact-rohan-current"
+    assert driver.closed is True
+
+
 def test_query_graph_with_trace_filters_group_request_lookup_to_object_terms(monkeypatch):
     def handler(query, _params):
         if "MATCH (c:Chunk)-[:PART_OF]->(d:Document)" in query:
@@ -745,6 +793,89 @@ def test_generate_groq_response_builds_fact_first_context(monkeypatch):
     assert captured["context"].split("\n\n")[0].startswith("Canonical facts")
 
 
+def test_generate_groq_response_uses_fact_summary_for_reports_to_lookup(monkeypatch):
+    monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
+
+    trace = {
+        "query_type": "person_lookup",
+        "query_profile": {"wants_list_format": False},
+        "evidence": [
+            {
+                "fact_id": "fact-1",
+                "fact_summary": "Rohan reports to Anil Fresh.",
+                "fact": {
+                    "claim_type": "REPORTS_TO",
+                    "status": "current",
+                    "canonical_key": "reports_to::rohan-id",
+                    "display_summary": "Rohan reports to Anil Fresh.",
+                },
+                "document": {"doc_id": "chat-msg-m1"},
+            },
+            {
+                "chunk_id": "chunk-1",
+                "chunk_summary": "Rohan reports to Hrithik.",
+                "document": {"doc_id": "chat-msg-m2"},
+            },
+        ],
+    }
+
+    result = services.generate_groq_response(
+        "Who does Rohan report to?",
+        [],
+        retrieval_trace=trace,
+    )
+
+    assert result["answer"] == "Rohan reports to Anil Fresh."
+    assert result["answer_payload"]["mode"] == "short"
+    assert result["answer_payload"]["reason_code"] == "direct_lookup"
+
+
+def test_generate_groq_response_surfaces_person_lookup_fact_conflict_without_llm(monkeypatch):
+    monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
+
+    trace = {
+        "query_type": "person_lookup",
+        "query_profile": {"wants_list_format": False},
+        "fact_lookup_conflict": {"ambiguous": True, "claim_type": "REPORTS_TO"},
+        "evidence": [
+            {
+                "fact_id": "fact-anil",
+                "fact_summary": "Rohan reports to Anil Fresh.",
+                "fact": {
+                    "claim_type": "REPORTS_TO",
+                    "status": "current",
+                    "canonical_key": "reports_to::rohan-id",
+                    "display_summary": "Rohan reports to Anil Fresh.",
+                },
+                "document": {"doc_id": "chat-msg-anil"},
+            },
+            {
+                "fact_id": "fact-hrithik",
+                "fact_summary": "Rohan reports to Hrithik.",
+                "fact": {
+                    "claim_type": "REPORTS_TO",
+                    "status": "current",
+                    "canonical_key": "reports_to::rohan-id",
+                    "display_summary": "Rohan reports to Hrithik.",
+                },
+                "document": {"doc_id": "chat-msg-hrithik"},
+            },
+        ],
+    }
+
+    result = services.generate_groq_response(
+        "Who does Rohan report to?",
+        [],
+        retrieval_trace=trace,
+    )
+
+    assert result["answer"] == "I found conflicting current reporting relationships for that lookup, so I can't collapse them to one safely."
+    assert result["answer_payload"]["bullets"] == [
+        "Rohan reports to Anil Fresh.",
+        "Rohan reports to Hrithik.",
+    ]
+
+
 def test_build_response_context_hides_internal_metadata_but_keeps_group_signal():
     context = services._build_response_context(
         [],
@@ -863,6 +994,54 @@ def test_generate_groq_response_surfaces_task_lookup_ambiguity_without_llm(monke
     assert result["answer_payload"]["bullets"] == [
         "Test User will send Project Alpha budget to Alice Johnson on 2026-05-10 09:00 PM IST.",
         "Test User will send Project Alpha budget to bijade on 2026-05-10 10:00 PM IST.",
+    ]
+
+
+def test_generate_groq_response_surfaces_schedule_fact_conflict_without_llm(monkeypatch):
+    monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
+
+    trace = {
+        "query_type": "schedule_or_timeline",
+        "query_profile": {"wants_list_format": False},
+        "fact_lookup_conflict": {"ambiguous": True, "claim_type": "MEETING_EVENT"},
+        "evidence": [
+            {
+                "fact_id": "fact-1",
+                "fact_summary": "Project Alpha review is scheduled for 2026-05-11T10:00:00+00:00",
+                "fact": {
+                    "claim_type": "MEETING_EVENT",
+                    "status": "current",
+                    "canonical_key": "meeting::group-alpha::project-alpha-review",
+                    "display_summary": "Project Alpha review is scheduled for 2026-05-11T10:00:00+00:00",
+                    "temporal_start": "2026-05-11T10:00:00+00:00",
+                },
+                "document": {"doc_id": "chat-msg-a"},
+            },
+            {
+                "fact_id": "fact-2",
+                "fact_summary": "Project Alpha review is scheduled for 2026-05-11T11:00:00+00:00",
+                "fact": {
+                    "claim_type": "MEETING_EVENT",
+                    "status": "current",
+                    "canonical_key": "meeting::group-alpha::project-alpha-review",
+                    "display_summary": "Project Alpha review is scheduled for 2026-05-11T11:00:00+00:00",
+                    "temporal_start": "2026-05-11T11:00:00+00:00",
+                },
+                "document": {"doc_id": "chat-msg-b"},
+            },
+        ],
+    }
+
+    result = services.generate_groq_response(
+        "When is the Project Alpha review?",
+        [],
+        retrieval_trace=trace,
+    )
+
+    assert result["answer"] == "I found conflicting current schedule evidence for that lookup, so I can't collapse it to one safely."
+    assert result["answer_payload"]["bullets"] == [
+        "Project Alpha review is scheduled for 2026-05-11 03:30 PM IST.",
+        "Project Alpha review is scheduled for 2026-05-11 04:30 PM IST.",
     ]
 
 
