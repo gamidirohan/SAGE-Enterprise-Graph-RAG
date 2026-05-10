@@ -161,3 +161,93 @@ def test_rerank_keeps_fact_priority_ahead_of_chunk(monkeypatch):
     result = rerank.rerank([], trace)
 
     assert result["trace"]["evidence"][0]["fact_id"] == "fact-current"
+
+
+def test_rerank_prefers_future_task_fact_over_stale_past_fact(monkeypatch):
+    trace = {
+        "query": "When am I sending the Project Alpha budget now?",
+        "query_type": "task_commitment_lookup",
+        "evidence": [
+            {
+                "fact_id": "fact-old",
+                "fact_summary": "Current user will send Project Alpha budget to bijade on 2020-04-14T21:00:00+00:00.",
+                "rank_score": 9.0,
+                "document": {"doc_id": "doc-old", "timestamp": "2020-04-13T10:00:00+00:00"},
+                "fact": {
+                    "claim_type": "TASK_ASSIGNMENT",
+                    "canonical_key": "assignment::old",
+                    "status": "current",
+                    "subject_entity_id": "currentUser",
+                    "object_entity_id": "1774788188804",
+                    "temporal_start": "2020-04-14T21:00:00+00:00",
+                    "last_seen_at": "2020-04-13T10:00:00+00:00",
+                },
+            },
+            {
+                "fact_id": "fact-future",
+                "fact_summary": "Current user will send Project Alpha budget on 2099-05-12T20:00:00+00:00.",
+                "rank_score": 1.0,
+                "document": {"doc_id": "doc-future", "timestamp": "2099-05-10T08:00:00+00:00"},
+                "fact": {
+                    "claim_type": "TASK_ASSIGNMENT",
+                    "canonical_key": "assignment::future",
+                    "status": "current",
+                    "subject_entity_id": "currentUser",
+                    "temporal_start": "2099-05-12T20:00:00+00:00",
+                    "last_seen_at": "2099-05-10T08:00:00+00:00",
+                },
+            },
+        ],
+    }
+    monkeypatch.setattr(rerank, "_cross_encoder_scores", lambda *_args, **_kwargs: ([9.0, 1.0], "fake"))
+
+    result = rerank.rerank([], trace)
+
+    assert len(result["trace"]["evidence"]) == 1
+    assert result["trace"]["evidence"][0]["fact_id"] == "fact-future"
+
+
+def test_rerank_keeps_multiple_current_task_facts_when_recipients_conflict(monkeypatch):
+    trace = {
+        "query": "When am I sending the Project Alpha budget now?",
+        "query_type": "task_commitment_lookup",
+        "evidence": [
+            {
+                "fact_id": "fact-alice",
+                "fact_summary": "Test User will send Project Alpha budget to Alice Johnson on 2099-05-12T20:00:00+00:00",
+                "rank_score": 9.0,
+                "document": {"doc_id": "doc-alice", "timestamp": "2099-05-10T08:00:00+00:00"},
+                "fact": {
+                    "claim_type": "TASK_ASSIGNMENT",
+                    "canonical_key": "assignment::direct:currentUser:1::send-project-alpha-budget",
+                    "status": "current",
+                    "subject_entity_id": "currentUser",
+                    "object_entity_id": "1",
+                    "temporal_start": "2099-05-12T20:00:00+00:00",
+                    "last_seen_at": "2099-05-10T08:00:00+00:00",
+                },
+            },
+            {
+                "fact_id": "fact-bijade",
+                "fact_summary": "Test User will send Project Alpha budget to bijade on 2099-05-12T21:00:00+00:00",
+                "rank_score": 8.5,
+                "document": {"doc_id": "doc-bijade", "timestamp": "2099-05-10T08:30:00+00:00"},
+                "fact": {
+                    "claim_type": "TASK_ASSIGNMENT",
+                    "canonical_key": "assignment::direct:currentUser:1774788188804::send-project-alpha-budget",
+                    "status": "current",
+                    "subject_entity_id": "currentUser",
+                    "object_entity_id": "1774788188804",
+                    "temporal_start": "2099-05-12T21:00:00+00:00",
+                    "last_seen_at": "2099-05-10T08:30:00+00:00",
+                },
+            },
+        ],
+    }
+    monkeypatch.setattr(rerank, "_cross_encoder_scores", lambda *_args, **_kwargs: ([9.0, 8.5], "fake"))
+
+    result = rerank.rerank([], trace)
+
+    assert result["trace"]["task_lookup_ambiguity"]["ambiguous"] is True
+    assert result["trace"]["task_lookup_ambiguity"]["reason"] == "multiple_recipients"
+    assert {item["fact_id"] for item in result["trace"]["evidence"]} == {"fact-alice", "fact-bijade"}

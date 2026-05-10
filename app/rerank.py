@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import math
 import os
 from functools import lru_cache
@@ -140,7 +141,135 @@ def _cross_encoder_scores(query: str, evidence: List[Dict[str, Any]]) -> Tuple[L
     return scores, DEFAULT_RERANK_MODEL
 
 
-def _score_evidence(query: str, evidence: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+def _parse_iso_timestamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _fact_temporal_sort_key(item: Dict[str, Any], query_type: str) -> Tuple[int, float, float]:
+    if query_type not in {"task_commitment_lookup", "schedule_or_timeline"}:
+        return (0, float("-inf"), float("-inf"))
+
+    fact = item.get("fact") or {}
+    if not item.get("fact_id"):
+        return (0, float("-inf"), float("-inf"))
+
+    now = datetime.now(timezone.utc)
+    temporal_start = _parse_iso_timestamp(fact.get("temporal_start"))
+    last_activity = (
+        _parse_iso_timestamp(fact.get("last_seen_at"))
+        or _parse_iso_timestamp(fact.get("first_seen_at"))
+        or _parse_iso_timestamp((item.get("document") or {}).get("timestamp"))
+    )
+
+    object_known = bool(fact.get("object_entity_id") or fact.get("object_key"))
+    status = str(fact.get("status") or "").lower()
+
+    bucket = 0
+    temporal_seconds = float("-inf")
+    last_activity_seconds = float("-inf")
+
+    if temporal_start is not None:
+        delta_seconds = (temporal_start - now).total_seconds()
+        temporal_seconds = temporal_start.timestamp()
+        if delta_seconds >= 0:
+            bucket = 4
+        elif delta_seconds >= -(14 * 86400):
+            bucket = 3
+        else:
+            bucket = 2
+    elif last_activity is not None:
+        bucket = 1
+
+    if object_known:
+        bucket += 1
+    if status == "current":
+        bucket += 1
+    if last_activity is not None:
+        last_activity_seconds = last_activity.timestamp()
+
+    return (bucket, last_activity_seconds, temporal_seconds)
+
+
+def _sort_key(item: Dict[str, Any], *, query_type: str, score_field: str) -> Tuple[Any, ...]:
+    return (
+        bool(item.get("exact_match")),
+        bool(item.get("fact_priority")),
+        *_fact_temporal_sort_key(item, query_type),
+        item.get(score_field) if item.get(score_field) is not None else -math.inf,
+        item.get("similarity") if item.get("similarity") is not None else item.get("rank_score") or -math.inf,
+    )
+
+
+def _task_signature(item: Dict[str, Any]) -> str:
+    fact = item.get("fact") or {}
+    canonical_key = str(fact.get("canonical_key") or "").strip()
+    if canonical_key and "::" in canonical_key:
+        return canonical_key.rsplit("::", 1)[-1]
+    return _normalize_text_fingerprint(item.get("fact_summary"))
+
+
+def _detect_task_lookup_ambiguity(items: List[Dict[str, Any]], *, query_type: str) -> Dict[str, Any]:
+    if query_type != "task_commitment_lookup":
+        return {"ambiguous": False}
+
+    task_facts = [
+        item
+        for item in items
+        if item.get("fact_id") and str((item.get("fact") or {}).get("claim_type") or "") == "TASK_ASSIGNMENT"
+    ]
+    if len(task_facts) < 2:
+        return {"ambiguous": False}
+
+    by_signature: Dict[str, List[Dict[str, Any]]] = {}
+    for item in task_facts:
+        signature = _task_signature(item)
+        if not signature:
+            continue
+        by_signature.setdefault(signature, []).append(item)
+
+    for signature, candidates in by_signature.items():
+        if len(candidates) < 2:
+            continue
+        recipients = {
+            str((item.get("fact") or {}).get("object_entity_id") or (item.get("fact") or {}).get("object_key") or "").strip()
+            for item in candidates
+            if (item.get("fact") or {}).get("object_entity_id") or (item.get("fact") or {}).get("object_key")
+        }
+        times = {
+            str((item.get("fact") or {}).get("temporal_start") or "").strip()
+            for item in candidates
+            if (item.get("fact") or {}).get("temporal_start")
+        }
+        if len(recipients) > 1:
+            return {
+                "ambiguous": True,
+                "task_signature": signature,
+                "candidate_count": len(candidates),
+                "reason": "multiple_recipients",
+            }
+        if len(times) > 1:
+            return {
+                "ambiguous": True,
+                "task_signature": signature,
+                "candidate_count": len(candidates),
+                "reason": "multiple_current_times",
+            }
+
+    return {"ambiguous": False}
+
+
+def _score_evidence(query: str, evidence: List[Dict[str, Any]], *, query_type: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     scores, model_name = _cross_encoder_scores(query, evidence)
     method = "cross_encoder"
 
@@ -156,12 +285,7 @@ def _score_evidence(query: str, evidence: List[Dict[str, Any]]) -> Tuple[List[Di
         scored.append(enriched)
 
     scored.sort(
-        key=lambda item: (
-            bool(item.get("exact_match")),
-            bool(item.get("fact_priority")),
-            item.get("rerank_score") or -math.inf,
-            item.get("similarity") or item.get("rank_score") or -math.inf,
-        ),
+        key=lambda item: _sort_key(item, query_type=query_type, score_field="rerank_score"),
         reverse=True,
     )
     for idx, item in enumerate(scored, start=1):
@@ -204,8 +328,12 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
     reranked_trace = dict(trace or {})
     evidence = [dict(item) for item in (reranked_trace.get("evidence") or [])]
     query = str(reranked_trace.get("query") or "").strip()
+    query_type = str(reranked_trace.get("query_type") or "").strip()
     query_profile = dict(reranked_trace.get("query_profile") or query_shape.analyze_query(query))
     top_k = DEFAULT_RERANK_TOP_K
+    if query_type in {"task_commitment_lookup", "schedule_or_timeline"} and not query_profile.get("wants_list_format"):
+        if any(item.get("fact_id") for item in evidence):
+            top_k = 1
 
     if not evidence:
         reranked_trace["evidence"] = []
@@ -220,7 +348,10 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
         return {"documents": list(documents or []), "trace": reranked_trace}
 
     if not query:
-        evidence.sort(key=lambda item: (item.get("rank_score") or item.get("similarity") or 0), reverse=True)
+        evidence.sort(key=lambda item: _sort_key(item, query_type=query_type, score_field="rank_score"), reverse=True)
+        ambiguity = _detect_task_lookup_ambiguity(evidence, query_type=query_type)
+        if ambiguity.get("ambiguous"):
+            top_k = min(max(top_k, int(ambiguity.get("candidate_count") or 2)), len(evidence), 3)
         selected, distinct_candidates = _select_diverse_evidence(
             evidence,
             top_k=min(top_k, len(evidence)),
@@ -229,6 +360,7 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
         reranked_trace["query_profile"] = query_profile
         reranked_trace["result_count"] = len(selected)
         reranked_trace["reranked"] = True
+        reranked_trace["task_lookup_ambiguity"] = ambiguity
         reranked_trace["reranker"] = {
             "enabled": False,
             "method": "score_sort",
@@ -239,9 +371,12 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
         return {"documents": _unique_documents(selected), "trace": reranked_trace}
 
     try:
-        scored, metadata = _score_evidence(query, evidence)
+        scored, metadata = _score_evidence(query, evidence, query_type=query_type)
     except Exception:
-        evidence.sort(key=lambda item: (item.get("rank_score") or item.get("similarity") or 0), reverse=True)
+        evidence.sort(key=lambda item: _sort_key(item, query_type=query_type, score_field="rank_score"), reverse=True)
+        ambiguity = _detect_task_lookup_ambiguity(evidence, query_type=query_type)
+        if ambiguity.get("ambiguous"):
+            top_k = min(max(top_k, int(ambiguity.get("candidate_count") or 2)), len(evidence), 3)
         selected, distinct_candidates = _select_diverse_evidence(
             evidence,
             top_k=min(top_k, len(evidence)),
@@ -254,6 +389,7 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
         reranked_trace["evidence_state"] = "no_evidence" if not selected else "partial_evidence" if len(selected) < 2 else "grounded"
         reranked_trace["reranked"] = False
         reranked_trace["query_profile"] = query_profile
+        reranked_trace["task_lookup_ambiguity"] = ambiguity
         reranked_trace["reranker"] = {
             "enabled": False,
             "method": "unavailable",
@@ -264,10 +400,10 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
         }
         return {"documents": _unique_documents(selected), "trace": reranked_trace}
 
-    selected, distinct_candidates = _select_diverse_evidence(
-        scored,
-        top_k=min(top_k, len(scored)),
-    )
+    ambiguity = _detect_task_lookup_ambiguity(scored, query_type=query_type)
+    if ambiguity.get("ambiguous"):
+        top_k = min(max(top_k, int(ambiguity.get("candidate_count") or 2)), len(scored), 3)
+    selected, distinct_candidates = _select_diverse_evidence(scored, top_k=min(top_k, len(scored)))
 
     reranked_trace["evidence"] = selected
     reranked_trace["result_count"] = len(selected)
@@ -277,6 +413,7 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
     reranked_trace["evidence_state"] = "no_evidence" if not selected else "partial_evidence" if len(selected) < 2 else "grounded"
     reranked_trace["reranked"] = True
     reranked_trace["query_profile"] = query_profile
+    reranked_trace["task_lookup_ambiguity"] = ambiguity
     reranked_trace["reranker"] = {
         "enabled": True,
         "method": metadata["method"],

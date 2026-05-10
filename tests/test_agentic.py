@@ -192,6 +192,35 @@ def test_enough_context_requires_fact_for_fact_priority_lookup():
     assert agentic._enough_context(trace, reasoning) is True
 
 
+def test_enough_context_requires_graph_round_for_deep_broad_query():
+    trace = {
+        "query_type": "general_search",
+        "selector_strategy": "fulltext",
+        "evidence": [
+            {"chunk_id": "chunk-1", "rank_score": 0.95, "document": {"doc_id": "doc-1"}},
+            {"chunk_id": "chunk-2", "rank_score": 0.9, "document": {"doc_id": "doc-2"}},
+        ],
+        "query_profile": {
+            "expects_multiple_items": True,
+            "requires_broad_coverage": True,
+            "minimum_unique_evidence": 2,
+            "minimum_tool_rounds": 2,
+        },
+    }
+    reasoning = {"validated_evidence_count": 2}
+    plan = {
+        "graph_depth": {"expand_hops": 3},
+        "tool_sequence": ["semantic", "fulltext", "graph"],
+        "query_profile": trace["query_profile"],
+    }
+
+    assert agentic._enough_context(trace, reasoning, plan=plan, attempt=2) is False
+
+    trace["selector_strategy"] = "graph"
+
+    assert agentic._enough_context(trace, reasoning, plan=plan, attempt=3) is True
+
+
 def test_run_agentic_query_uses_single_retry_when_critic_requests_it(monkeypatch):
     calls = []
 
@@ -469,7 +498,13 @@ def test_run_agentic_query_requires_distinct_coverage_for_multi_item_questions(m
     monkeypatch.setattr(
         agentic.graph_query,
         "expand_retrieval_context",
-        lambda *_args, **_kwargs: {"documents": [], "trace": {"evidence": []}},
+        lambda *_args, seed_trace=None, **_kwargs: {
+            "documents": [],
+            "trace": {
+                **dict(seed_trace or {}),
+                "selector_strategy": "graph",
+            },
+        },
     )
     monkeypatch.setattr(
         agentic.graph_query,
@@ -504,8 +539,10 @@ def test_run_agentic_query_requires_distinct_coverage_for_multi_item_questions(m
     assert calls == ["semantic", "fulltext"]
     assert result["trace"]["agentic"]["rounds"][0]["enough_context"] is False
     assert result["trace"]["agentic"]["rounds"][0]["distinct_evidence_count"] == 1
-    assert result["trace"]["agentic"]["rounds"][1]["enough_context"] is True
+    assert result["trace"]["agentic"]["rounds"][1]["enough_context"] is False
     assert result["trace"]["agentic"]["rounds"][1]["distinct_evidence_count"] >= 2
+    assert result["trace"]["agentic"]["rounds"][2]["tool"] == "graph"
+    assert result["trace"]["agentic"]["rounds"][2]["depth"] == 3
     assert result["trace"]["agentic"]["coverage_status"]["status"] == "sufficient"
     assert result["trace"]["agentic"]["open_questions"] == []
 
@@ -547,6 +584,100 @@ def test_agent_planner_identifies_relationship_lookup_route(monkeypatch):
     assert plan["orchestration"]["planner_required"] is True
     assert plan["orchestration"]["retriever_required"] is True
     assert plan["orchestration"]["reasoner_required"] is True
+
+
+def test_agent_planner_assigns_dynamic_graph_depth_from_query_shape():
+    direct_plan = agentic.build_plan("What is the office address for HQ?")
+    relationship_plan = agentic.build_plan("Who does Rohan report to?")
+    broad_plan = agentic.build_plan(
+        "Compare Project Beta and Project Gamma based on the chat history."
+    )
+
+    assert direct_plan["graph_depth"]["seed_hops"] == 0
+    assert direct_plan["graph_depth"]["expand_hops"] == 1
+    assert relationship_plan["graph_depth"]["expand_hops"] == 2
+    assert broad_plan["graph_depth"]["expand_hops"] == 3
+    assert broad_plan["constraints"]["max_depth"] == 3
+
+
+def test_agent_retriever_passes_planned_depth_to_tools(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        agentic.retrieval_selector,
+        "decide_strategy",
+        lambda _query, user_id=None: {
+            "strategy": "semantic",
+            "reasons": ["test"],
+            "llm_used": False,
+            "heuristic_confidence": 0.9,
+        },
+    )
+
+    def fake_retrieve(_query, user_id=None, strategy="hybrid", seed_trace=None, context_hops=None):
+        calls.append((strategy, context_hops))
+        return {
+            "documents": ["ctx"],
+            "trace": {
+                "query_type": "general_search",
+                "user_scoped": bool(user_id),
+                "evidence": [{"chunk_id": "chunk-1", "rank_score": 0.9, "document": {"doc_id": "doc-1"}}],
+                "selector_strategy": strategy,
+            },
+        }
+
+    monkeypatch.setattr(agentic.vector_search, "retrieve", fake_retrieve)
+    monkeypatch.setattr(agentic.rerank, "rerank", lambda documents, trace: {"documents": documents, "trace": trace})
+    monkeypatch.setattr(
+        agentic.graph_query,
+        "expand_retrieval_context",
+        lambda _query, seed_trace=None, user_id=None, expand_hops=None: {
+            "documents": [],
+            "trace": {
+                **(seed_trace or {"evidence": []}),
+                "graph_depth": {"expand_hops": expand_hops},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        agentic.services,
+        "generate_groq_response",
+        lambda *_args, **_kwargs: {
+            "answer": "test answer",
+            "answer_payload": {
+                "schema_version": 1,
+                "mode": "short",
+                "reason_code": "direct_lookup",
+                "summary": "test answer",
+                "bullets": [],
+                "explanation": "ok",
+                "evidence_refs": ["chunk:chunk-1"],
+            },
+            "thinking": [],
+        },
+    )
+    monkeypatch.setattr(
+        agentic.policy_guard,
+        "evaluate_answer",
+        lambda **_kwargs: {"passed": True, "retryable": False, "issues": [], "grounded_evidence_count": 1, "provenance_count": 1},
+    )
+
+    result = agentic.run_agentic_query("What is the office address for HQ?")
+
+    assert ("semantic", 0) in calls
+    assert result["trace"]["agentic"]["planner"]["graph_depth"]["seed_hops"] == 0
+    assert result["trace"]["agentic"]["tool_calls"][0]["depth"] == 0
+
+
+def test_agent_graph_depth_escalates_on_repeated_graph_calls():
+    state = {
+        "graph_depth": {"seed_hops": 1, "expand_hops": 2, "max_hops": 3},
+        "tool_calls": [{"tool": "graph"}],
+    }
+
+    active = agentic._active_depth_for_tool(state, "graph")
+
+    assert active["effective_hops"] == 3
 
 
 def test_agent_retriever_executes_tool_sequence(monkeypatch):

@@ -196,8 +196,10 @@ def _run_planner(runtime: OrchestratorState) -> AgentObservation:
     )
     plan = agentic.build_plan(runtime.query, user_id=runtime.user_id)
     runtime.state["plan"] = plan
+    runtime.state["graph_depth"] = dict(plan.get("graph_depth") or {})
     runtime.state["orchestration"] = plan.get("orchestration") or {}
     runtime.state["trace"]["query_profile"] = plan.get("query_profile") or runtime.state["trace"].get("query_profile")
+    runtime.state["trace"]["graph_depth"] = dict(plan.get("graph_depth") or {})
     
     # Display the orchestration contract in colored logs
     orchestration = runtime.state.get("orchestration") or {}

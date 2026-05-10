@@ -69,6 +69,56 @@ DOCUMENT_FULLTEXT_QUERY = """
     LIMIT 5
 """
 
+CHUNK_FULLTEXT_QUERY_SHALLOW = """
+    CALL db.index.fulltext.queryNodes($index_name, $query) YIELD node, score
+    WITH node AS c, score
+    MATCH (c:Chunk)-[:PART_OF]->(d:Document)
+    WHERE coalesce(d.conversation_type, '') <> 'sage'
+      AND NOT coalesce(d.source, '') STARTS WITH 'sage_'
+    RETURN
+        c.chunk_id AS chunk_id,
+        c.summary AS chunk_summary,
+        d,
+        score AS similarity,
+        'PART_OF' AS relationship,
+        NULL AS direction,
+        NULL AS n,
+        1 AS hop_count,
+        [
+            coalesce(d.subject, d.title, d.name, d.id, d.doc_id, labels(d)[0]),
+            coalesce(c.subject, c.title, c.name, c.id, c.doc_id, c.chunk_id, labels(c)[0])
+        ] AS path_nodes,
+        ['PART_OF'] AS path_relationships
+    ORDER BY similarity DESC
+    LIMIT 5
+"""
+
+DOCUMENT_FULLTEXT_QUERY_SHALLOW = """
+    CALL db.index.fulltext.queryNodes($index_name, $query) YIELD node, score
+    WITH node AS d, score
+    WHERE d:Document
+      AND coalesce(d.conversation_type, '') <> 'sage'
+      AND NOT coalesce(d.source, '') STARTS WITH 'sage_'
+    OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
+    WITH d, score, collect(DISTINCT c)[0] AS c
+    RETURN
+        coalesce(c.chunk_id, d.doc_id + '-document') AS chunk_id,
+        coalesce(c.summary, d.summary, d.subject, d.doc_id) AS chunk_summary,
+        d,
+        score AS similarity,
+        'PART_OF' AS relationship,
+        'document' AS direction,
+        NULL AS n,
+        1 AS hop_count,
+        [
+            coalesce(d.subject, d.title, d.name, d.id, d.doc_id, labels(d)[0]),
+            coalesce(c.summary, c.chunk_id, d.subject, d.doc_id)
+        ] AS path_nodes,
+        ['PART_OF'] AS path_relationships
+    ORDER BY similarity DESC
+    LIMIT 5
+"""
+
 
 def _ensure_fulltext_indexes(session: Any) -> None:
     statements = (
@@ -122,9 +172,11 @@ def _build_trace_from_rows(
     query: str,
     user_id: Optional[str],
     tool_name: str,
+    context_hops: int,
 ) -> Dict[str, Any]:
-    personalized_lookup = bool(user_id and services._contains_first_person(query))
+    personalized_lookup = bool(user_id and services._is_personalized_lookup(query))
     query_type = services._classify_query(query)
+    query_profile = services.query_shape.analyze_query(query) if hasattr(services, "query_shape") else None
     evidence: List[Dict[str, Any]] = []
     documents: List[str] = []
     matched_entities: List[str] = []
@@ -200,6 +252,8 @@ def _build_trace_from_rows(
         "query_type": query_type,
         "user_scoped": personalized_lookup,
         "user_id": user_id,
+        "query_profile": query_profile,
+        "graph_depth": {"seed_hops": context_hops},
         "matched_entities": matched_entities,
         "result_count": len(evidence),
         "max_hop_count": max((int(item.get("hop_count") or 0) for item in evidence), default=0),
@@ -212,12 +266,13 @@ def _build_trace_from_rows(
     return {"documents": documents, "trace": trace}
 
 
-def semantic_retrieve(query: str, *, user_id: Optional[str] = None) -> Dict[str, Any]:
-    result = services.query_graph_with_trace(query, user_id=user_id)
+def semantic_retrieve(query: str, *, user_id: Optional[str] = None, context_hops: Optional[int] = None) -> Dict[str, Any]:
+    result = services.query_graph_with_trace(query, user_id=user_id, seed_hops=context_hops)
     return {"documents": result.get("documents") or [], "trace": _normalize_trace(result.get("trace"), tool_name="semantic")}
 
 
-def fulltext_retrieve(query: str, *, user_id: Optional[str] = None) -> Dict[str, Any]:
+def fulltext_retrieve(query: str, *, user_id: Optional[str] = None, context_hops: Optional[int] = None) -> Dict[str, Any]:
+    resolved_context_hops = services._resolve_seed_context_hops(query, query_type=services._classify_query(query), seed_hops=context_hops)
     driver = utils.create_neo4j_driver()
     focus_terms = services._extract_query_focus_terms(query)
     reports_to_lookup = services._is_reports_to_lookup(query)
@@ -227,7 +282,7 @@ def fulltext_retrieve(query: str, *, user_id: Optional[str] = None) -> Dict[str,
             chunk_rows = [
                 services._prepare_chunk_result(row, focus_terms=focus_terms, reports_to_lookup=reports_to_lookup)
                 for row in session.run(
-                    CHUNK_FULLTEXT_QUERY,
+                    CHUNK_FULLTEXT_QUERY if resolved_context_hops >= services.DEFAULT_SEED_CONTEXT_HOPS else CHUNK_FULLTEXT_QUERY_SHALLOW,
                     {"index_name": CHUNK_FULLTEXT_INDEX, "query": query},
                 ).data()
                 if row.get("chunk_id") or row.get("chunk_summary")
@@ -235,7 +290,7 @@ def fulltext_retrieve(query: str, *, user_id: Optional[str] = None) -> Dict[str,
             doc_rows = [
                 services._prepare_chunk_result(row, focus_terms=focus_terms, reports_to_lookup=reports_to_lookup)
                 for row in session.run(
-                    DOCUMENT_FULLTEXT_QUERY,
+                    DOCUMENT_FULLTEXT_QUERY if resolved_context_hops >= services.DEFAULT_SEED_CONTEXT_HOPS else DOCUMENT_FULLTEXT_QUERY_SHALLOW,
                     {"index_name": DOCUMENT_FULLTEXT_INDEX, "query": query},
                 ).data()
                 if row.get("chunk_id") or row.get("chunk_summary")
@@ -247,12 +302,13 @@ def fulltext_retrieve(query: str, *, user_id: Optional[str] = None) -> Dict[str,
                 {
                     "query": query,
                     "query_type": services._classify_query(query),
-                    "user_scoped": bool(user_id and services._contains_first_person(query)),
+                    "user_scoped": bool(user_id and services._is_personalized_lookup(query)),
                     "user_id": user_id,
                     "matched_entities": [],
                     "result_count": 0,
                     "max_hop_count": 0,
-                    "retrieval_path": services._build_path_summary(bool(user_id and services._contains_first_person(query)), None)["path"],
+                    "graph_depth": {"seed_hops": resolved_context_hops},
+                    "retrieval_path": services._build_path_summary(bool(user_id and services._is_personalized_lookup(query)), None)["path"],
                     "evidence": [],
                     "no_evidence": True,
                     "error": str(exc),
@@ -261,7 +317,13 @@ def fulltext_retrieve(query: str, *, user_id: Optional[str] = None) -> Dict[str,
             ),
         }
     merged_rows = services._merge_ranked_results(chunk_rows, doc_rows, limit=5)
-    return _build_trace_from_rows(merged_rows, query=query, user_id=user_id, tool_name="fulltext")
+    return _build_trace_from_rows(
+        merged_rows,
+        query=query,
+        user_id=user_id,
+        tool_name="fulltext",
+        context_hops=resolved_context_hops,
+    )
 
 
 def merge_results(
@@ -320,15 +382,16 @@ def retrieve(
     user_id: Optional[str] = None,
     strategy: str = "hybrid",
     seed_trace: Optional[Dict[str, Any]] = None,
+    context_hops: Optional[int] = None,
 ) -> Dict[str, Any]:
     del seed_trace
 
     if strategy == "semantic":
-        return semantic_retrieve(query, user_id=user_id)
+        return semantic_retrieve(query, user_id=user_id, context_hops=context_hops)
     if strategy == "fulltext":
-        return fulltext_retrieve(query, user_id=user_id)
+        return fulltext_retrieve(query, user_id=user_id, context_hops=context_hops)
 
-    semantic = semantic_retrieve(query, user_id=user_id)
+    semantic = semantic_retrieve(query, user_id=user_id, context_hops=context_hops)
     if strategy == "hybrid":
-        return merge_results(semantic, fulltext_retrieve(query, user_id=user_id))
+        return merge_results(semantic, fulltext_retrieve(query, user_id=user_id, context_hops=context_hops))
     return semantic

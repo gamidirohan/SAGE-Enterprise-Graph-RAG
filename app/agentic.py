@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import inspect
 import re
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -315,12 +316,55 @@ def _tool_plan_for(tool_sequence: List[str]) -> List[Dict[str, str]]:
     return [{"tool": tool_name, "purpose": purposes.get(tool_name, "Retrieve supporting evidence.")} for tool_name in tool_sequence]
 
 
+def _invoke_with_supported_kwargs(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return func(*args, **kwargs)
+
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+        return func(*args, **kwargs)
+
+    supported_kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
+    return func(*args, **supported_kwargs)
+
+
+def _planned_graph_depth(query: str, *, query_profile: Dict[str, Any], query_type: str) -> Dict[str, Any]:
+    depth = query_shape.recommend_graph_depth(
+        query,
+        query_profile=query_profile,
+        query_type=query_type,
+    )
+    return {
+        "seed_hops": int(depth.get("seed_hops") or 0),
+        "expand_hops": int(depth.get("expand_hops") or 1),
+        "max_hops": int(depth.get("max_hops") or 1),
+        "reason": str(depth.get("reason") or "direct_lookup"),
+    }
+
+
+def _active_depth_for_tool(state: Dict[str, Any], tool_name: str) -> Dict[str, int]:
+    planned = dict((state.get("graph_depth") or {}) if isinstance(state.get("graph_depth"), dict) else {})
+    seed_hops = int(planned.get("seed_hops") or 0)
+    expand_hops = int(planned.get("expand_hops") or 1)
+    max_hops = max(int(planned.get("max_hops") or expand_hops or 1), 1)
+
+    if tool_name != "graph":
+        return {"seed_hops": seed_hops, "expand_hops": expand_hops, "effective_hops": seed_hops}
+
+    prior_graph_calls = sum(1 for call in state.get("tool_calls") or [] if call.get("tool") == "graph")
+    effective_expand_hops = min(expand_hops + prior_graph_calls, max_hops)
+    return {"seed_hops": seed_hops, "expand_hops": expand_hops, "effective_hops": effective_expand_hops}
+
+
 def build_plan(query: str, *, user_id: Optional[str] = None) -> Dict[str, Any]:
     selector = retrieval_selector.decide_strategy(query, user_id=user_id)
     entities = _extract_entities(query)
     extracted_constraints = _extract_constraints(query)
     intent = _infer_intent(query, extracted_constraints)
     query_profile = query_shape.analyze_query(query)
+    query_type = services._classify_query(query)
+    graph_depth = _planned_graph_depth(query, query_profile=query_profile, query_type=query_type)
     risk_flags = _risk_flags_for(query, extracted_constraints)
     orchestration = _orchestration_contract_for(
         query,
@@ -348,12 +392,13 @@ def build_plan(query: str, *, user_id: Optional[str] = None) -> Dict[str, Any]:
         "risk_flags": risk_flags,
         "strategy": selector["strategy"],
         "selector": selector,
+        "graph_depth": graph_depth,
         "orchestration": orchestration,
         "agents": list(AGENT_REGISTRY.values()),
         "constraints": {
             "allowed_nodes": graph_query.schema_snapshot()["node_types"],
             "allowed_edges": graph_query.schema_snapshot()["edge_types"],
-            "max_depth": 3,
+            "max_depth": graph_depth["max_hops"],
             "max_rounds": 3,
             "max_retries": 1,
         },
@@ -385,6 +430,7 @@ def _blank_trace(*, query: str, user_id: Optional[str]) -> Dict[str, Any]:
         "query_type": "general_search",
         "user_scoped": bool(user_id),
         "user_id": user_id,
+        "graph_depth": None,
         "matched_entities": [],
         "result_count": 0,
         "max_hop_count": 0,
@@ -409,6 +455,7 @@ def _initial_state(
         "user_id": user_id,
         "history": list(history or []),
         "plan": plan,
+        "graph_depth": dict((plan or {}).get("graph_depth") or {}),
         "trace": _blank_trace(query=query, user_id=user_id),
         "documents": [],
         "rounds": [],
@@ -429,6 +476,7 @@ def _record_tool_call(
     status: str,
     result_count: int,
     duration_ms: int,
+    depth: Optional[int] = None,
     error: Optional[str] = None,
 ) -> None:
     state["tool_calls"].append(
@@ -436,6 +484,7 @@ def _record_tool_call(
             "tool": tool,
             "attempt": attempt,
             "query": state["query"],
+            "depth": depth,
             "status": status,
             "result_count": result_count,
             "duration_ms": duration_ms,
@@ -453,6 +502,14 @@ def _enough_context(
 ) -> bool:
     coverage = _trace_coverage(trace, reasoning, plan=plan)
     if coverage["requires_broad_coverage"] and attempt < coverage["minimum_tool_rounds"]:
+        return False
+    planned_graph_depth = int((((plan or {}).get("graph_depth") or {}).get("expand_hops")) or 0)
+    if (
+        coverage["requires_broad_coverage"]
+        and planned_graph_depth >= 3
+        and "graph" in list((plan or {}).get("tool_sequence") or [])
+        and (trace or {}).get("selector_strategy") != "graph"
+    ):
         return False
     if coverage["expects_multiple_items"]:
         return (
@@ -476,6 +533,8 @@ def _run_retrieval_round(
     event_sink: Optional[AgentEventSink] = None,
 ) -> Dict[str, Any]:
     tool_label = "BM25" if tool_name == "fulltext" else tool_name.title()
+    active_depth = _active_depth_for_tool(state, tool_name)
+    effective_hops = int(active_depth.get("effective_hops") or 0)
     _emit_event(
         state,
         event_sink,
@@ -483,7 +542,7 @@ def _run_retrieval_round(
         agent="retriever",
         stage="retrieve",
         status="running",
-        message=f"Retriever selected {tool_label} evidence search.",
+        message=f"Retriever selected {tool_label} evidence search at depth {effective_hops}.",
         tool=tool_name,
         attempt=attempt,
     )
@@ -501,17 +560,21 @@ def _run_retrieval_round(
     started_at = time.perf_counter()
     try:
         if tool_name == "graph":
-            result = graph_query.expand_retrieval_context(
+            result = _invoke_with_supported_kwargs(
+                graph_query.expand_retrieval_context,
                 state["query"],
                 seed_trace=state.get("trace"),
                 user_id=state.get("user_id"),
+                expand_hops=effective_hops,
             )
         else:
-            result = vector_search.retrieve(
+            result = _invoke_with_supported_kwargs(
+                vector_search.retrieve,
                 state["query"],
                 user_id=state.get("user_id"),
                 strategy=tool_name,
                 seed_trace=state.get("trace"),
+                context_hops=effective_hops,
             )
     except Exception as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -522,6 +585,7 @@ def _run_retrieval_round(
             status="failed",
             result_count=0,
             duration_ms=duration_ms,
+            depth=effective_hops,
             error=str(exc),
         )
         _emit_event(
@@ -634,10 +698,16 @@ def _run_retrieval_round(
 
     state["documents"] = reranked.get("documents") or []
     state["trace"] = trace_with_profile
+    state["trace"]["graph_depth"] = {
+        **dict(state.get("graph_depth") or {}),
+        "effective_hops": effective_hops,
+        "tool": tool_name,
+    }
     state["rounds"].append(
         {
             "attempt": attempt,
             "tool": tool_name,
+            "depth": effective_hops,
             "result_count": int((state["trace"] or {}).get("result_count") or 0),
             "evidence_ref_count": len(services._derive_evidence_refs(retrieval_trace=state["trace"], limit=8)),
             "distinct_evidence_count": int(((state["trace"] or {}).get("coverage") or {}).get("distinct_evidence_count") or 0),
@@ -652,6 +722,7 @@ def _run_retrieval_round(
         status="ok",
         result_count=int((state["trace"] or {}).get("result_count") or 0),
         duration_ms=duration_ms,
+        depth=effective_hops,
     )
     evidence_state = (state["trace"] or {}).get("evidence_state") or ("grounded" if enough_context else "partial_evidence")
     _emit_event(
@@ -716,7 +787,9 @@ def _legacy_run_agentic_query(
     try:
         plan = build_plan(query, user_id=user_id)
         state["plan"] = plan
+        state["graph_depth"] = dict(plan.get("graph_depth") or {})
         state["trace"]["query_profile"] = plan.get("query_profile") or state["trace"].get("query_profile")
+        state["trace"]["graph_depth"] = dict(plan.get("graph_depth") or {})
         _emit_event(
             state,
             event_sink,

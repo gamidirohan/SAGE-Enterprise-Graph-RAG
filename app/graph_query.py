@@ -39,6 +39,9 @@ SCHEMA_SNAPSHOT: Dict[str, List[str]] = {
     ],
 }
 
+DEFAULT_EXPAND_HOPS = 1
+MAX_EXPAND_HOPS = 3
+
 
 def schema_snapshot() -> Dict[str, List[str]]:
     return dict(SCHEMA_SNAPSHOT)
@@ -79,12 +82,56 @@ GRAPH_CONTEXT_FROM_FACT_QUERY = """
 """
 
 
+def _normalize_expand_hops(expand_hops: Optional[int]) -> int:
+    try:
+        value = int(expand_hops)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        value = DEFAULT_EXPAND_HOPS
+    return max(1, min(value, MAX_EXPAND_HOPS))
+
+
+def _build_graph_context_from_chunk_query(expand_hops: int) -> str:
+    if expand_hops <= DEFAULT_EXPAND_HOPS:
+        return GRAPH_CONTEXT_FROM_CHUNK_QUERY
+    return f"""
+    MATCH (c:Chunk {{chunk_id: $chunk_id}})-[:PART_OF]->(d:Document)
+    CALL {{
+        WITH c, d
+        MATCH p=(d)<-[:PART_OF]-(c)-[*1..{expand_hops}]-(n)
+        WHERE all(node IN nodes(p) WHERE single(other IN nodes(p) WHERE other = node))
+          AND NOT n:Chunk
+          AND NOT n:Document
+        RETURN p, n
+        ORDER BY length(p) DESC
+        LIMIT 3
+    }}
+    RETURN
+        c.chunk_id AS chunk_id,
+        c.summary AS chunk_summary,
+        d,
+        $base_score AS similarity,
+        coalesce(type(last(relationships(p))), 'PART_OF') AS relationship,
+        CASE WHEN endNode(last(relationships(p))) = n THEN 'outgoing' ELSE 'incoming' END AS direction,
+        n AS n,
+        length(p) AS hop_count,
+        [
+            node IN nodes(p) |
+            coalesce(node.subject, node.title, node.name, node.id, node.doc_id, node.chunk_id, labels(node)[0])
+        ] AS path_nodes,
+        [rel IN relationships(p) | type(rel)] AS path_relationships
+    ORDER BY hop_count ASC, relationship ASC
+    LIMIT 3
+    """
+
+
 def expand_retrieval_context(
     query: str,
     *,
     seed_trace: Optional[Dict[str, Any]],
     user_id: Optional[str] = None,
+    expand_hops: Optional[int] = None,
 ) -> Dict[str, Any]:
+    resolved_expand_hops = _normalize_expand_hops(expand_hops)
     evidence = list((seed_trace or {}).get("evidence") or [])
     if not evidence:
         return {
@@ -92,12 +139,13 @@ def expand_retrieval_context(
             "trace": {
                 "query": query,
                 "query_type": services._classify_query(query),
-                "user_scoped": bool(user_id and services._contains_first_person(query)),
+                "user_scoped": bool(user_id and services._is_personalized_lookup(query)),
                 "user_id": user_id,
                 "matched_entities": [],
                 "result_count": 0,
                 "max_hop_count": 0,
-                "retrieval_path": services._build_path_summary(bool(user_id and services._contains_first_person(query)), None)["path"],
+                "graph_depth": {"expand_hops": resolved_expand_hops},
+                "retrieval_path": services._build_path_summary(bool(user_id and services._is_personalized_lookup(query)), None)["path"],
                 "evidence": [],
                 "no_evidence": True,
                 "evidence_state": "no_evidence",
@@ -112,11 +160,14 @@ def expand_retrieval_context(
             for rank, item in enumerate(evidence[:3], start=1):
                 base_score = max(float(item.get("rank_score", item.get("similarity", 0.5)) or 0.5) - (rank * 0.01), 0.1)
                 if item.get("chunk_id"):
-                    rows = session.run(
-                        GRAPH_CONTEXT_FROM_CHUNK_QUERY,
-                        chunk_id=item["chunk_id"],
-                        base_score=base_score,
-                    ).data()
+                    chunk_query = _build_graph_context_from_chunk_query(resolved_expand_hops)
+                    rows = session.run(chunk_query, chunk_id=item["chunk_id"], base_score=base_score).data()
+                    if not rows and resolved_expand_hops > DEFAULT_EXPAND_HOPS:
+                        rows = session.run(
+                            GRAPH_CONTEXT_FROM_CHUNK_QUERY,
+                            chunk_id=item["chunk_id"],
+                            base_score=base_score,
+                        ).data()
                     ranked_rows.extend(
                         services._prepare_chunk_result(row, focus_terms=[], reports_to_lookup=False)
                         for row in rows
@@ -133,7 +184,7 @@ def expand_retrieval_context(
                             row,
                             query_type=services._classify_query(query),
                             user_id=user_id,
-                            personalized_lookup=bool(user_id and services._contains_first_person(query)),
+                            personalized_lookup=bool(user_id and services._is_personalized_lookup(query)),
                             exact_match=True,
                             focus_terms=[],
                             reports_to_lookup=services._is_reports_to_lookup(query),
@@ -147,12 +198,13 @@ def expand_retrieval_context(
             "trace": {
                 "query": query,
                 "query_type": services._classify_query(query),
-                "user_scoped": bool(user_id and services._contains_first_person(query)),
+                "user_scoped": bool(user_id and services._is_personalized_lookup(query)),
                 "user_id": user_id,
                 "matched_entities": [],
                 "result_count": 0,
                 "max_hop_count": 0,
-                "retrieval_path": services._build_path_summary(bool(user_id and services._contains_first_person(query)), None)["path"],
+                "graph_depth": {"expand_hops": resolved_expand_hops},
+                "retrieval_path": services._build_path_summary(bool(user_id and services._is_personalized_lookup(query)), None)["path"],
                 "evidence": [],
                 "no_evidence": True,
                 "evidence_state": "no_evidence",
@@ -170,12 +222,13 @@ def expand_retrieval_context(
             "trace": {
                 "query": query,
                 "query_type": services._classify_query(query),
-                "user_scoped": bool(user_id and services._contains_first_person(query)),
+                "user_scoped": bool(user_id and services._is_personalized_lookup(query)),
                 "user_id": user_id,
                 "matched_entities": [],
                 "result_count": 0,
                 "max_hop_count": 0,
-                "retrieval_path": services._build_path_summary(bool(user_id and services._contains_first_person(query)), None)["path"],
+                "graph_depth": {"expand_hops": resolved_expand_hops},
+                "retrieval_path": services._build_path_summary(bool(user_id and services._is_personalized_lookup(query)), None)["path"],
                 "evidence": [],
                 "no_evidence": True,
                 "evidence_state": "no_evidence",
@@ -188,8 +241,15 @@ def expand_retrieval_context(
     except ImportError:  # pragma: no cover - direct execution fallback
         import vector_search
 
-    result = vector_search._build_trace_from_rows(merged, query=query, user_id=user_id, tool_name="graph")
+    result = vector_search._build_trace_from_rows(
+        merged,
+        query=query,
+        user_id=user_id,
+        tool_name="graph",
+        context_hops=resolved_expand_hops,
+    )
     result["trace"]["selector_strategy"] = "graph"
+    result["trace"]["graph_depth"] = {"expand_hops": resolved_expand_hops}
     return result
 
     # 'validate_trace_paths': G- CT (Graph Constrained Chain of Thought): 

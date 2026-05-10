@@ -36,6 +36,8 @@ ISO_OFFSET_TIMESTAMP_PATTERN = re.compile(
 )
 RECENCY_BOOST_MAX = 0.18
 RECENCY_DECAY_DAYS = 21.0
+DEFAULT_SEED_CONTEXT_HOPS = 1
+MAX_SEED_CONTEXT_HOPS = 1
 
 GRAPH_VECTOR_QUERY = """
     MATCH (c:Chunk)-[:PART_OF]->(d:Document)
@@ -117,6 +119,80 @@ PERSON_GRAPH_VECTOR_QUERY = """
         [type(pd), 'PART_OF', type(r)] AS path_relationships
 """
 
+GRAPH_VECTOR_QUERY_SHALLOW = """
+    MATCH (c:Chunk)-[:PART_OF]->(d:Document)
+    WHERE c.embedding IS NOT NULL
+      AND coalesce(d.conversation_type, '') <> 'sage'
+      AND NOT coalesce(d.source, '') STARTS WITH 'sage_'
+    WITH c, d, c.embedding AS chunk_embedding, $query_embedding AS query_embedding
+    WITH c, d,
+         gds.similarity.cosine(chunk_embedding, query_embedding) AS similarity,
+         c.timestamp AS chunk_ts,
+         d.timestamp AS doc_ts
+    WITH c, d, similarity,
+         coalesce(chunk_ts, doc_ts) AS recency_ts
+    WITH c, d, similarity,
+         recency_ts,
+         CASE
+             WHEN recency_ts IS NULL THEN 0.0
+             ELSE exp(-1.0 * duration.inDays(datetime(recency_ts), datetime()).days / $recency_decay_days) * $recency_boost_max
+         END AS recency_weight
+    WITH c, d, similarity + recency_weight AS similarity
+    ORDER BY similarity DESC
+    LIMIT 3
+    RETURN
+        c.chunk_id AS chunk_id,
+        c.summary AS chunk_summary,
+        d,
+        similarity,
+        'PART_OF' AS relationship,
+        NULL AS n,
+        1 AS hop_count,
+        [
+            coalesce(d.subject, d.title, d.name, d.id, d.doc_id, labels(d)[0]),
+            coalesce(c.subject, c.title, c.name, c.id, c.doc_id, c.chunk_id, labels(c)[0])
+        ] AS path_nodes,
+        ['PART_OF'] AS path_relationships
+"""
+
+PERSON_GRAPH_VECTOR_QUERY_SHALLOW = """
+    MATCH (person:Person {id: $user_id})
+    MATCH (person)-[pd:SENT|RECEIVED_BY]-(d:Document)<-[:PART_OF]-(c:Chunk)
+    WHERE c.embedding IS NOT NULL
+      AND coalesce(d.conversation_type, '') <> 'sage'
+      AND NOT coalesce(d.source, '') STARTS WITH 'sage_'
+    WITH person, c, d, pd, c.embedding AS chunk_embedding, $query_embedding AS query_embedding
+    WITH person, c, d, pd,
+         gds.similarity.cosine(chunk_embedding, query_embedding) AS similarity,
+         c.timestamp AS chunk_ts,
+         d.timestamp AS doc_ts
+    WITH person, c, d, pd, similarity,
+         coalesce(chunk_ts, doc_ts) AS recency_ts
+    WITH person, c, d, pd, similarity,
+         recency_ts,
+         CASE
+             WHEN recency_ts IS NULL THEN 0.0
+             ELSE exp(-1.0 * duration.inDays(datetime(recency_ts), datetime()).days / $recency_decay_days) * $recency_boost_max
+         END AS recency_weight
+    WITH person, c, d, pd, similarity + recency_weight AS similarity
+    ORDER BY similarity DESC
+    LIMIT 3
+    RETURN
+        c.chunk_id AS chunk_id,
+        c.summary AS chunk_summary,
+        d,
+        similarity,
+        'PART_OF' AS relationship,
+        NULL AS n,
+        2 AS hop_count,
+        [
+            coalesce(person.subject, person.title, person.name, person.id, person.doc_id, labels(person)[0]),
+            coalesce(d.subject, d.title, d.name, d.id, d.doc_id, labels(d)[0]),
+            coalesce(c.subject, c.title, c.name, c.id, c.doc_id, c.chunk_id, labels(c)[0])
+        ] AS path_nodes,
+        [type(pd), 'PART_OF'] AS path_relationships
+"""
+
 FACT_VECTOR_QUERY = """
     MATCH (f:CanonicalFact)
     WHERE f.status = 'current' AND f.embedding IS NOT NULL
@@ -175,6 +251,10 @@ PERSON_TASK_FACT_QUERY = """
 """
 
 FIRST_PERSON_PATTERN = re.compile(r"\b(i|me|my|mine|myself)\b", re.IGNORECASE)
+DISCOURSE_FIRST_PERSON_PREFIX = re.compile(
+    r"^\s*(?:can\s+you\s+)?(?:please\s+)?(?:give|show|tell|walk|help)\s+me(?:\s+through)?\b[\s,:-]*",
+    re.IGNORECASE,
+)
 TASK_LOOKUP_PATTERN = re.compile(
     r"\b("
     r"promise|promised|commit|committed|commitment|agreed|supposed to|meant to|"
@@ -243,6 +323,7 @@ BASIC_VERBATIM_PHRASES = (
     "copy paste",
 )
 DIRECT_LOOKUP_PREFIX = re.compile(r"^\s*(who|whom|what|when|which|did|do|does|is|are|was|were|am|can)\b", re.IGNORECASE)
+TIME_LOOKUP_PATTERN = re.compile(r"^\s*(when|by when|what time|what day|what date|which day)\b", re.IGNORECASE)
 QUERY_NAME_PATTERN = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b")
 QUERY_EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 QUERY_TOKEN_PATTERN = re.compile(r"\b[a-zA-Z][a-zA-Z0-9_\-]{2,}\b")
@@ -377,6 +458,7 @@ CHAT_PROMPT = ChatPromptTemplate.from_template(
     - `bullets` contains only extra user-facing detail points; use an empty array if no extra detail is needed
     - Do not emit markdown headings like `Answer:` or `Evidence and Provenance:`
     - Do not emit JSON code fences, metadata labels, raw trace fields, document IDs, fact IDs, or reasoning notes
+    - Never expose internal identifiers or backend metadata such as canonical keys, group IDs, internal subject codes, sender IDs, or similarity scores
     - Do not mention the answer mode, explanation policy, or why the answer is short or long
     - Do not invent graph paths, document IDs, policy IDs, timestamps, approvals, or reasoning steps that are not supported by the provided context
     - Treat canonical facts as higher-trust evidence than chunk summaries when both are present
@@ -437,6 +519,17 @@ def _contains_first_person(text: str) -> bool:
     return bool(FIRST_PERSON_PATTERN.search(text))
 
 
+def _strip_discourse_first_person_prefix(text: str) -> str:
+    return DISCOURSE_FIRST_PERSON_PREFIX.sub("", text or "", count=1)
+
+
+def _is_personalized_lookup(text: str) -> bool:
+    if not _contains_first_person(text):
+        return False
+    stripped = _strip_discourse_first_person_prefix(text)
+    return bool(FIRST_PERSON_PATTERN.search(stripped))
+
+
 def _normalize_query_text(text: str) -> str:
     return " ".join(text.lower().split())
 
@@ -475,7 +568,7 @@ def _looks_like_task_lookup(text: str) -> bool:
         return False
     if any(token in lowered for token in ("promise", "promised", "supposed to", "assigned", "assignment", "working on", "responsible for", "deadline", "due", "by when")):
         return True
-    return _contains_first_person(text) and any(token in lowered for token in ("what", "which", "when", "am i", "did i", "do i", "have i"))
+    return _is_personalized_lookup(text) and any(token in lowered for token in ("what", "which", "when", "am i", "did i", "do i", "have i"))
 
 
 def _looks_like_compound_lookup(text: str) -> bool:
@@ -490,11 +583,16 @@ def _looks_like_compound_lookup(text: str) -> bool:
 
 def _classify_query(text: str) -> str:
     lowered = text.lower()
+    query_profile = query_shape.analyze_query(text)
     if _looks_like_task_lookup(text):
         return "task_commitment_lookup"
     if _looks_like_compound_lookup(text):
         return "compound_lookup"
-    if _contains_first_person(text):
+    if query_profile.get("requires_broad_coverage"):
+        if any(token in lowered for token in ("explain", "why", "reason", "because", "cause", "walk me through")):
+            return "explanation"
+        return "general_search"
+    if _is_personalized_lookup(text):
         return "personal_context"
     if any(token in lowered for token in ("weekend", "today", "tomorrow", "schedule", "meeting", "plan", "review", "when")):
         return "schedule_or_timeline"
@@ -526,6 +624,26 @@ def _looks_like_direct_lookup_request(text: str, query_type: Optional[str]) -> b
     if DIRECT_LOOKUP_PREFIX.search(text) and not _looks_like_broad_or_explanatory_request(text, query_type):
         return True
     return False
+
+
+def _resolve_seed_context_hops(
+    query: str,
+    *,
+    query_profile: Optional[Dict[str, Any]] = None,
+    query_type: Optional[str] = None,
+    seed_hops: Optional[int] = None,
+) -> int:
+    if seed_hops is None:
+        seed_hops = query_shape.recommend_graph_depth(
+            query,
+            query_profile=query_profile,
+            query_type=query_type,
+        ).get("seed_hops")
+    try:
+        value = int(seed_hops)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        value = DEFAULT_SEED_CONTEXT_HOPS
+    return max(0, min(value, MAX_SEED_CONTEXT_HOPS))
 
 
 def _select_answer_mode(query: str, retrieval_trace: Optional[Dict[str, Any]] = None) -> tuple[str, str]:
@@ -604,6 +722,110 @@ def _normalize_bullets(values: Any) -> List[str]:
 
     bullets = [_normalize_summary_text(value) for value in values]
     return [value for value in bullets if value]
+
+
+def _ensure_sentence(text: str) -> str:
+    normalized = _normalize_summary_text(text)
+    if not normalized:
+        return ""
+    if normalized[-1] in ".!?":
+        return normalized
+    return f"{normalized}."
+
+
+def _query_asks_for_time(query: str) -> bool:
+    return bool(TIME_LOOKUP_PATTERN.search(query or ""))
+
+
+def _fact_visible_summary(item: Dict[str, Any]) -> str:
+    fact = item.get("fact") or {}
+    return _ensure_sentence(
+        str(
+            fact.get("display_summary")
+            or item.get("fact_summary")
+            or ""
+        )
+    )
+
+
+def _build_fact_backed_answer(
+    query: str,
+    *,
+    mode: str,
+    reason_code: str,
+    retrieval_trace: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    trace = dict(retrieval_trace or {})
+    query_type = str(trace.get("query_type") or "").strip()
+    evidence = [dict(item) for item in (trace.get("evidence") or []) if isinstance(item, dict)]
+    fact_items = [item for item in evidence if item.get("fact_id")]
+
+    if query_type not in FACT_PRIORITY_QUERY_TYPES or not fact_items:
+        return None
+
+    ambiguity = dict(trace.get("task_lookup_ambiguity") or {})
+    if query_type == "task_commitment_lookup" and ambiguity.get("ambiguous"):
+        summaries = [_fact_visible_summary(item) for item in fact_items[:3]]
+        summaries = [summary for summary in summaries if summary]
+        if not summaries:
+            summaries = ["I found multiple current commitments that match that request."]
+        answer_payload = _build_answer_payload(
+            mode=mode,
+            reason_code=reason_code,
+            summary="I found multiple current commitments that match that request, so I can't collapse them to one safely.",
+            bullets=summaries,
+            retrieval_trace=trace,
+        )
+        return {
+            "answer": answer_payload["summary"],
+            "answer_payload": answer_payload,
+            "thinking": [],
+        }
+
+    top_fact = fact_items[0]
+    visible_summary = _fact_visible_summary(top_fact)
+    temporal_start = str(((top_fact.get("fact") or {}).get("temporal_start")) or "").strip()
+
+    if query_type == "task_commitment_lookup" and _query_asks_for_time(query):
+        summary = (
+            visible_summary
+            or (f"The current recorded time for that commitment is {temporal_start}." if temporal_start else "")
+            or "I found a current matching commitment, but it does not include a scheduled time."
+        )
+        answer_payload = _build_answer_payload(
+            mode=mode,
+            reason_code=reason_code,
+            summary=summary,
+            bullets=[],
+            retrieval_trace=trace,
+        )
+        return {
+            "answer": answer_payload["summary"],
+            "answer_payload": answer_payload,
+            "thinking": [],
+        }
+
+    if query_type == "schedule_or_timeline" and _query_asks_for_time(query):
+        summary = (
+            f"The scheduled time is {temporal_start}."
+            if temporal_start
+            else visible_summary
+            or "I found a matching schedule fact, but it does not include a time."
+        )
+        answer_payload = _build_answer_payload(
+            mode=mode,
+            reason_code=reason_code,
+            summary=summary,
+            bullets=[],
+            retrieval_trace=trace,
+        )
+        return {
+            "answer": answer_payload["summary"],
+            "answer_payload": answer_payload,
+            "thinking": [],
+        }
+
+    return None
 
 
 def _utcnow() -> datetime:
@@ -827,6 +1049,8 @@ def _is_displayable_trace_entity(value: Any) -> bool:
         return False
     if lowered.startswith("direct:") or lowered.startswith("group") or lowered.startswith("message-attachment-"):
         return False
+    if re.fullmatch(r"g-[a-z0-9-]+", lowered):
+        return False
     if re.fullmatch(r"[0-9]+", text):
         return False
     if re.fullmatch(r"[0-9a-f]{32,64}", lowered):
@@ -842,6 +1066,18 @@ def _append_matched_entity(matched_entities: List[str], candidate: Any) -> None:
         return
     if text not in matched_entities:
         matched_entities.append(text)
+
+
+def _context_entity_label(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if not _is_displayable_trace_entity(text):
+        return None
+    return text
+
+
+def _join_context_parts(*parts: Optional[str]) -> str:
+    values = [_normalize_summary_text(part) for part in parts if _normalize_summary_text(part)]
+    return " | ".join(values)
 
 
 def _is_reports_to_lookup(query: str) -> bool:
@@ -1045,6 +1281,10 @@ def _combine_ranked_results(
         focused = [item for item in combined if int(item.get("focus_match_score") or 0) > 0]
         if focused:
             combined = focused
+    elif query_type in {"compound_lookup", "general_search", "explanation", "schedule_or_timeline"} and focus_terms:
+        focused = [item for item in combined if int(item.get("focus_match_score") or 0) > 0]
+        if focused:
+            combined = focused
     combined.sort(key=_result_rank_value, reverse=True)
     return combined[:limit]
 
@@ -1062,38 +1302,48 @@ def _build_response_context(documents: List[str], retrieval_trace: Optional[Dict
         if item.get("fact_id"):
             fact = item.get("fact") or {}
             document = item.get("document") or {}
-            relationship_semantics = ""
+            relationship_semantics = None
             if fact.get("claim_type") == "REPORTS_TO":
-                relationship_semantics = " | Relationship Semantics: subject/person reports to object/manager"
+                relationship_semantics = "Relationship Semantics: subject/person reports to object/manager"
+            subject_label = _context_entity_label(fact.get("subject_display") or fact.get("subject_entity_id") or fact.get("subject_key"))
+            object_label = _context_entity_label(fact.get("object_display") or fact.get("object_entity_id") or fact.get("object_key"))
+            conversation_type = _normalize_summary_text(document.get("conversation_type") or "")
+            time_text = (
+                f"Time: {fact.get('temporal_start')} ({fact.get('temporal_granularity') or 'unresolved'})"
+                if fact.get("temporal_start")
+                else None
+            )
             fact_lines.append(
                 "- "
-                f"Summary: {item.get('fact_summary') or 'No fact summary'} | "
-                f"Type: {fact.get('claim_type') or 'unknown'} | "
-                f"Status: {fact.get('status') or 'unknown'} | "
-                f"Conversation Type: {document.get('conversation_type') or 'unknown'} | "
-                f"Subject: {fact.get('subject_entity_id') or fact.get('subject_key') or 'unknown'} | "
-                f"Object: {fact.get('object_entity_id') or fact.get('object_key') or 'unknown'} | "
-                f"Time: {fact.get('temporal_start') or 'not specified'} ({fact.get('temporal_granularity') or 'unresolved'}) | "
-                f"Canonical Key: {fact.get('canonical_key') or item.get('related_node', {}).get('display_name') or 'unknown'} | "
-                f"Supporting Document ID: {document.get('doc_id') or 'unknown'} | "
-                f"Similarity: {item.get('similarity', 0)}"
-                f"{relationship_semantics}"
+                + _join_context_parts(
+                    f"Summary: {item.get('fact_summary') or 'No fact summary'}",
+                    f"Type: {fact.get('claim_type') or 'unknown'}",
+                    f"Status: {fact.get('status') or 'unknown'}",
+                    f"Conversation Type: {conversation_type}" if conversation_type else None,
+                    f"Subject: {subject_label}" if subject_label else None,
+                    f"Object: {object_label}" if object_label else None,
+                    time_text,
+                    relationship_semantics,
+                )
             )
             continue
 
         if item.get("chunk_id"):
             document = item.get("document") or {}
             related_node = item.get("related_node") or {}
+            conversation_type = _normalize_summary_text(document.get("conversation_type") or "")
+            subject_label = _context_entity_label(document.get("subject"))
+            sender_label = _context_entity_label(document.get("sender"))
+            related_label = _context_entity_label(related_node.get("display_name"))
             chunk_lines.append(
                 "- "
-                f"Summary: {item.get('chunk_summary') or 'No summary'} | "
-                f"Document ID: {document.get('doc_id') or 'unknown'} | "
-                f"Conversation Type: {document.get('conversation_type') or 'unknown'} | "
-                f"Subject: {document.get('subject') or 'No Subject'} | "
-                f"Sender: {document.get('sender') or 'Unknown'} | "
-                f"Relationship: {item.get('relationship') or 'RELATED_TO'} | "
-                f"Related Node: {related_node.get('display_name') or 'Unknown'} | "
-                f"Similarity: {item.get('similarity', 0)}"
+                + _join_context_parts(
+                    f"Summary: {item.get('chunk_summary') or 'No summary'}",
+                    f"Conversation Type: {conversation_type}" if conversation_type else None,
+                    f"Subject: {subject_label}" if subject_label else None,
+                    f"Sender: {sender_label}" if sender_label else None,
+                    f"Related Node: {related_label}" if related_label else None,
+                )
             )
             continue
 
@@ -1101,9 +1351,9 @@ def _build_response_context(documents: List[str], retrieval_trace: Optional[Dict
 
     sections: List[str] = []
     if fact_lines:
-        sections.append("Canonical facts (highest-trust graph evidence):\n" + "\n".join(fact_lines))
+        sections.append("Canonical facts:\n" + "\n".join(fact_lines))
     if chunk_lines:
-        sections.append("Supporting document and chunk evidence:\n" + "\n".join(chunk_lines))
+        sections.append("Supporting message and document evidence:\n" + "\n".join(chunk_lines))
     if other_lines:
         sections.append("Additional evidence:\n" + "\n".join(f"- {line}" for line in other_lines))
     return "\n\n".join(sections) if sections else "\n\n".join(_extract_context_parts(documents))
@@ -1132,10 +1382,28 @@ def extract_structured_data(document_text: str, doc_id: str) -> Dict[str, Any]:
     return structured_data
 
 
-def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+def query_graph_with_trace(
+    user_input: str,
+    user_id: Optional[str] = None,
+    *,
+    seed_hops: Optional[int] = None,
+) -> Dict[str, Any]:
     driver = None
-    personalized_lookup = bool(user_id and _contains_first_person(user_input))
+    personalized_lookup = bool(user_id and _is_personalized_lookup(user_input))
     query_type = _classify_query(user_input)
+    query_profile = query_shape.analyze_query(user_input)
+    resolved_seed_hops = _resolve_seed_context_hops(
+        user_input,
+        query_profile=query_profile,
+        query_type=query_type,
+        seed_hops=seed_hops,
+    )
+    graph_depth = query_shape.recommend_graph_depth(
+        user_input,
+        query_profile=query_profile,
+        query_type=query_type,
+    )
+    graph_depth["seed_hops"] = resolved_seed_hops
     focus_terms = _extract_query_focus_terms(user_input)
     reports_to_lookup = _is_reports_to_lookup(user_input)
 
@@ -1149,7 +1417,7 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
             global_results = [
                 _prepare_chunk_result(row, focus_terms=focus_terms, reports_to_lookup=reports_to_lookup)
                 for row in session.run(
-                    GRAPH_VECTOR_QUERY,
+                    GRAPH_VECTOR_QUERY if resolved_seed_hops >= DEFAULT_SEED_CONTEXT_HOPS else GRAPH_VECTOR_QUERY_SHALLOW,
                     query_embedding=query_embedding.tolist(),
                     recency_decay_days=RECENCY_DECAY_DAYS,
                     recency_boost_max=RECENCY_BOOST_MAX,
@@ -1161,7 +1429,7 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                 person_results = [
                     _prepare_chunk_result(row, focus_terms=focus_terms, reports_to_lookup=reports_to_lookup)
                     for row in session.run(
-                        PERSON_GRAPH_VECTOR_QUERY,
+                        PERSON_GRAPH_VECTOR_QUERY if resolved_seed_hops >= DEFAULT_SEED_CONTEXT_HOPS else PERSON_GRAPH_VECTOR_QUERY_SHALLOW,
                         user_id=user_id,
                         query_embedding=query_embedding.tolist(),
                         recency_decay_days=RECENCY_DECAY_DAYS,
@@ -1214,7 +1482,6 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                         query_type=query_type,
                         user_id=user_id,
                         personalized_lookup=personalized_lookup,
-                        exact_match=True,
                         focus_terms=focus_terms,
                         reports_to_lookup=reports_to_lookup,
                     )
@@ -1304,13 +1571,19 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                         "claim_type": fact.get("claim_type"),
                         "status": fact.get("status"),
                         "canonical_key": canonical_key,
+                        "value_text": fact.get("value_text"),
                         "subject_key": fact.get("subject_key"),
                         "subject_entity_id": fact.get("subject_entity_id"),
+                        "subject_display": fact.get("subject_display"),
                         "object_key": fact.get("object_key"),
                         "object_entity_id": fact.get("object_entity_id"),
+                        "object_display": fact.get("object_display"),
+                        "display_summary": fact.get("display_summary"),
                         "temporal_start": fact.get("temporal_start"),
                         "temporal_end": fact.get("temporal_end"),
                         "temporal_granularity": fact.get("temporal_granularity"),
+                        "first_seen_at": fact.get("first_seen_at"),
+                        "last_seen_at": fact.get("last_seen_at"),
                         "support_count": fact.get("support_count"),
                         "confidence": fact.get("confidence"),
                     },
@@ -1421,6 +1694,8 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
             "query_type": query_type,
             "user_scoped": personalized_lookup,
             "user_id": user_id,
+            "query_profile": query_profile,
+            "graph_depth": graph_depth,
             "matched_entities": matched_entities,
             "result_count": len(evidence),
             "max_hop_count": max((item["hop_count"] for item in evidence), default=0),
@@ -1440,6 +1715,8 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                 "query_type": "error",
                 "user_scoped": personalized_lookup,
                 "user_id": user_id,
+                "query_profile": query_profile,
+                "graph_depth": graph_depth,
                 "matched_entities": [],
                 "result_count": 0,
                 "max_hop_count": 0,
@@ -1464,6 +1741,14 @@ def generate_groq_response(
     retrieval_trace: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     mode, reason_code = _select_answer_mode(query, retrieval_trace=retrieval_trace)
+    fact_backed_answer = _build_fact_backed_answer(
+        query,
+        mode=mode,
+        reason_code=reason_code,
+        retrieval_trace=retrieval_trace,
+    )
+    if fact_backed_answer is not None:
+        return fact_backed_answer
     if not documents:
         answer_payload = _build_answer_payload(
             mode=mode,
@@ -1508,7 +1793,7 @@ def generate_groq_response(
         user_context = "No authenticated user context was provided."
         if user_id:
             user_context = f"Authenticated user id: {user_id}."
-            if _contains_first_person(query):
+            if _is_personalized_lookup(query):
                 user_context += " Treat first-person references (I/me/my) as this user unless the query says otherwise."
         retrieval_guidance = "Use only the retrieved evidence. If evidence is weak or missing, say so clearly."
         question_shape_guidance = "Answer directly from the available evidence."
@@ -1518,7 +1803,8 @@ def generate_groq_response(
         if query_type in FACT_PRIORITY_QUERY_TYPES:
             retrieval_guidance = (
                 "This is a task or commitment lookup. Prioritize current CanonicalFact evidence over chunk summaries. "
-                "Use chunk evidence only to support provenance, add timestamps, or clarify ambiguity."
+                "Prefer the most temporally relevant active fact over stale past facts, and use chunk evidence only to support provenance, add timestamps, or clarify ambiguity. "
+                "Do not list older alternatives unless the user asked for history or the top evidence is genuinely conflicting."
             )
         elif (retrieval_trace or {}).get("evidence"):
             retrieval_guidance = (

@@ -52,6 +52,20 @@ def test_classify_query_marks_sending_question_as_task_lookup():
     assert services._classify_query("When am I sending the Project Alpha budget now?") == "task_commitment_lookup"
 
 
+def test_classify_query_prefers_broad_explanation_over_schedule_keyword():
+    assert (
+        services._classify_query(
+            "Explain all dashboard-related conversations with Elijah, including design review, brand guidelines, and dark mode status."
+        )
+        == "explanation"
+    )
+
+
+def test_personalized_lookup_ignores_discourse_give_me_prefix():
+    assert services._is_personalized_lookup("Give me a detailed summary of everything we know about Project Beta.") is False
+    assert services._is_personalized_lookup("Show me what I promised Alice.") is True
+
+
 def test_build_answer_payload_converts_iso_utc_timestamps_to_ist():
     payload = services._build_answer_payload(
         mode="long",
@@ -137,6 +151,51 @@ def test_query_graph_with_trace_returns_evidence(monkeypatch):
     assert result["trace"]["max_hop_count"] >= 2
     assert result["trace"]["evidence"][0]["document"]["doc_id"] == "doc-1"
     assert "Charlie Davis" in result["trace"]["matched_entities"]
+    assert driver.closed is True
+
+
+def test_query_graph_with_trace_uses_shallow_seed_depth_for_direct_lookup(monkeypatch):
+    rows = [
+        {
+            "chunk_id": "chunk-hq",
+            "chunk_summary": "HQ is located at 123 Enterprise Way, Suite 400.",
+            "d": {"doc_id": "doc-hq", "subject": "Facilities", "sender": "ops"},
+            "similarity": 0.97,
+            "relationship": "PART_OF",
+            "n": None,
+            "hop_count": 1,
+            "path_nodes": ["Facilities", "chunk-hq"],
+            "path_relationships": ["PART_OF"],
+        }
+    ]
+    session = _Session(rows)
+    driver = _Driver(session)
+
+    monkeypatch.setattr(services.utils, "create_neo4j_driver", lambda: driver)
+    monkeypatch.setattr(services.utils, "get_cached_embedding_model", lambda: _Model())
+
+    result = services.query_graph_with_trace("What is the office address for HQ?")
+
+    assert result["trace"]["graph_depth"]["seed_hops"] == 0
+    assert result["trace"]["max_hop_count"] == 1
+    assert result["trace"]["evidence"][0]["related_node"] == {}
+    assert driver.closed is True
+
+
+def test_query_graph_with_trace_does_not_scope_broad_summary_to_authenticated_user(monkeypatch):
+    session = _Session([])
+    driver = _Driver(session)
+
+    monkeypatch.setattr(services.utils, "create_neo4j_driver", lambda: driver)
+    monkeypatch.setattr(services.utils, "get_cached_embedding_model", lambda: _Model())
+
+    result = services.query_graph_with_trace(
+        "Give me a detailed summary of everything we know about Project Beta, including meetings, bugs, preparation work, and follow-up actions.",
+        user_id="currentUser",
+    )
+
+    assert result["trace"]["user_scoped"] is False
+    assert result["trace"]["query_type"] == "general_search"
     assert driver.closed is True
 
 
@@ -572,6 +631,55 @@ def test_query_graph_with_trace_compound_lookup_keeps_mixed_evidence_and_filters
     assert driver.closed is True
 
 
+def test_query_graph_with_trace_compound_lookup_prefers_focus_matched_chunk_over_unrelated_fact(monkeypatch):
+    def handler(query, _params):
+        if "MATCH (c:Chunk)-[:PART_OF]->(d:Document)" in query:
+            return [
+                {
+                    "chunk_id": "chat-msg-investor-chunk-0",
+                    "chunk_summary": "Need to get on an investors call with Antler on Monday (11-May-26).",
+                    "d": {"doc_id": "chat-msg-investor", "subject": "Chat message", "sender": "currentUser", "conversation_type": "group"},
+                    "similarity": 0.66,
+                    "rank_score": 0.66,
+                    "relationship": "PART_OF",
+                    "n": {"id": "g-940-saia", "_labels": ["Group"]},
+                }
+            ]
+        if "MATCH (f:CanonicalFact)" in query:
+            return [
+                {
+                    "fact_id": "fact-review",
+                    "fact_summary": "Project Alpha review is scheduled for 2026-05-11T10:00:00Z",
+                    "f": {
+                        "fact_id": "fact-review",
+                        "canonical_key": "meeting::group-alpha::project-alpha-review",
+                        "claim_type": "MEETING_EVENT",
+                        "status": "current",
+                        "subject_key": "group-alpha",
+                        "subject_entity_id": "group-alpha",
+                        "temporal_start": "2026-05-11T10:00:00Z",
+                        "temporal_granularity": "datetime",
+                    },
+                    "d": {"doc_id": "chat-msg-review", "subject": "Chat message", "sender": "u1", "source": "chat_message"},
+                    "similarity": 0.82,
+                }
+            ]
+        return []
+
+    session = _DispatchSession(handler)
+    driver = _Driver(session)
+
+    monkeypatch.setattr(services.utils, "create_neo4j_driver", lambda: driver)
+    monkeypatch.setattr(services.utils, "get_cached_embedding_model", lambda: _Model())
+
+    result = services.query_graph_with_trace("When do we have an investor call and with whom is it?")
+
+    assert result["trace"]["query_type"] == "compound_lookup"
+    assert result["trace"]["evidence"][0]["chunk_id"] == "chat-msg-investor-chunk-0"
+    assert all(item.get("fact_id") != "fact-review" for item in result["trace"]["evidence"])
+    assert driver.closed is True
+
+
 def test_generate_groq_response_builds_fact_first_context(monkeypatch):
     captured = {}
 
@@ -635,6 +743,127 @@ def test_generate_groq_response_builds_fact_first_context(monkeypatch):
     assert captured["retrieval_guidance"].startswith("This is a task or commitment lookup.")
     assert captured["answer_mode"] == "short"
     assert captured["context"].split("\n\n")[0].startswith("Canonical facts")
+
+
+def test_build_response_context_hides_internal_metadata_but_keeps_group_signal():
+    context = services._build_response_context(
+        [],
+        retrieval_trace={
+            "evidence": [
+                {
+                    "chunk_id": "chunk-investor",
+                    "chunk_summary": "Need to get on an investors call with Antler on Monday (11-May-26).",
+                    "document": {
+                        "doc_id": "chat-msg-investor",
+                        "subject": "g-940-saia",
+                        "sender": "9501",
+                        "conversation_type": "group",
+                    },
+                    "related_node": {"display_name": "g-940-saia"},
+                },
+                {
+                    "fact_id": "fact-1",
+                    "fact_summary": "Project Alpha review is scheduled for 2026-05-11T10:00:00Z",
+                    "fact": {
+                        "claim_type": "MEETING_EVENT",
+                        "status": "current",
+                        "canonical_key": "meeting::g-940-saia::review-next-monday-at-10am",
+                        "subject_entity_id": "g-940-saia",
+                        "temporal_start": "2026-05-11T10:00:00Z",
+                        "temporal_granularity": "datetime",
+                    },
+                    "document": {"doc_id": "chat-msg-review", "conversation_type": "group"},
+                },
+            ]
+        },
+    )
+
+    assert "Conversation Type: group" in context
+    assert "g-940-saia" not in context
+    assert "9501" not in context
+    assert "chat-msg-investor" not in context
+    assert "canonical_key" not in context.lower()
+
+
+def test_generate_groq_response_uses_fact_summary_for_task_when_lookup(monkeypatch):
+    monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
+
+    trace = {
+        "query_type": "task_commitment_lookup",
+        "evidence": [
+            {
+                "fact_id": "fact-1",
+                "fact_summary": "Test User will send Project Alpha budget to Alice Johnson on 2026-05-10T15:30:00+00:00",
+                "fact": {
+                    "claim_type": "TASK_ASSIGNMENT",
+                    "status": "current",
+                    "canonical_key": "assignment::direct:currentUser:1::send-project-alpha-budget",
+                    "display_summary": "Test User will send Project Alpha budget to Alice Johnson on 2026-05-10T15:30:00+00:00",
+                    "temporal_start": "2026-05-10T15:30:00+00:00",
+                },
+                "document": {"doc_id": "chat-msg-m1"},
+            }
+        ],
+    }
+
+    result = services.generate_groq_response(
+        "When am I sending the Project Alpha budget now?",
+        ["Fact Summary: Test User will send Project Alpha budget to Alice Johnson on 2026-05-10T15:30:00+00:00"],
+        user_id="currentUser",
+        retrieval_trace=trace,
+    )
+
+    assert result["answer"] == "Test User will send Project Alpha budget to Alice Johnson on 2026-05-10 09:00 PM IST."
+    assert result["answer_payload"]["mode"] == "short"
+    assert result["answer_payload"]["reason_code"] == "direct_lookup"
+
+
+def test_generate_groq_response_surfaces_task_lookup_ambiguity_without_llm(monkeypatch):
+    monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
+
+    trace = {
+        "query_type": "task_commitment_lookup",
+        "task_lookup_ambiguity": {"ambiguous": True, "reason": "multiple_recipients"},
+        "evidence": [
+            {
+                "fact_id": "fact-alice",
+                "fact_summary": "Test User will send Project Alpha budget to Alice Johnson on 2026-05-10T15:30:00+00:00",
+                "fact": {
+                    "claim_type": "TASK_ASSIGNMENT",
+                    "status": "current",
+                    "canonical_key": "assignment::direct:currentUser:1::send-project-alpha-budget",
+                    "display_summary": "Test User will send Project Alpha budget to Alice Johnson on 2026-05-10T15:30:00+00:00",
+                    "temporal_start": "2026-05-10T15:30:00+00:00",
+                },
+                "document": {"doc_id": "chat-msg-a"},
+            },
+            {
+                "fact_id": "fact-bijade",
+                "fact_summary": "Test User will send Project Alpha budget to bijade on 2026-05-10T16:30:00+00:00",
+                "fact": {
+                    "claim_type": "TASK_ASSIGNMENT",
+                    "status": "current",
+                    "canonical_key": "assignment::direct:currentUser:1774788188804::send-project-alpha-budget",
+                    "display_summary": "Test User will send Project Alpha budget to bijade on 2026-05-10T16:30:00+00:00",
+                    "temporal_start": "2026-05-10T16:30:00+00:00",
+                },
+                "document": {"doc_id": "chat-msg-b"},
+            },
+        ],
+    }
+
+    result = services.generate_groq_response(
+        "When am I sending the Project Alpha budget now?",
+        [],
+        user_id="currentUser",
+        retrieval_trace=trace,
+    )
+
+    assert result["answer"] == "I found multiple current commitments that match that request, so I can't collapse them to one safely."
+    assert result["answer_payload"]["bullets"] == [
+        "Test User will send Project Alpha budget to Alice Johnson on 2026-05-10 09:00 PM IST.",
+        "Test User will send Project Alpha budget to bijade on 2026-05-10 10:00 PM IST.",
+    ]
 
 
 def test_build_response_context_marks_reports_to_object_as_manager():

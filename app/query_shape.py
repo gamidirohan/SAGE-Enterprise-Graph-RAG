@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 _MULTI_ITEM_PHRASES = (
@@ -84,4 +84,97 @@ def analyze_query(text: str) -> Dict[str, Any]:
         "first_person_scope": first_person_scope,
         "minimum_unique_evidence": 2 if expects_multiple_items else 1,
         "minimum_tool_rounds": 2 if requires_broad_coverage else 1,
+    }
+
+
+def recommend_graph_depth(
+    text: str,
+    *,
+    query_profile: Optional[Dict[str, Any]] = None,
+    query_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    profile = dict(query_profile or analyze_query(text))
+    normalized = _normalize_query(text)
+    effective_query_type = str(query_type or "").strip().lower()
+
+    if (
+        effective_query_type == "compound_lookup"
+        or profile.get("requires_broad_coverage")
+        or any(
+            phrase in normalized
+            for phrase in (
+                "compare",
+                "differences between",
+                "detailed summary",
+                "detailed overview",
+                "walk me through",
+                "everything we know",
+                "including",
+            )
+        )
+    ):
+        return {
+            "seed_hops": 1,
+            "expand_hops": 3,
+            "max_hops": 3,
+            "reason": "broad_multi_hop",
+        }
+
+    if (
+        effective_query_type == "explanation"
+        or any(
+            token in normalized
+            for token in (
+                "policy",
+                "compliance",
+                "compliant",
+                "violation",
+                "violates",
+                "audit",
+                "risk",
+                "why",
+                "because",
+                "cause",
+                "root cause",
+            )
+        )
+    ):
+        return {
+            "seed_hops": 1,
+            "expand_hops": 3,
+            "max_hops": 3,
+            "reason": "policy_or_explanatory",
+        }
+
+    if (
+        effective_query_type in {"task_commitment_lookup", "schedule_or_timeline", "person_lookup", "personal_context"}
+        or any(
+            token in normalized
+            for token in (
+                "report to",
+                "reports to",
+                "manager",
+                "owner",
+                "ownership",
+                "responsible",
+                "approved",
+                "attended",
+                "timeline",
+                "meeting",
+                "review",
+            )
+        )
+    ):
+        return {
+            "seed_hops": 1,
+            "expand_hops": 2,
+            "max_hops": 3,
+            "reason": "relationship_or_temporal",
+        }
+
+    return {
+        "seed_hops": 0,
+        "expand_hops": 1,
+        "max_hops": 2,
+        "reason": "direct_lookup",
     }
