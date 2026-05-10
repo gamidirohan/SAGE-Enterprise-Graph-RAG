@@ -261,6 +261,51 @@ def _risk_flags_for(query: str, constraints: Dict[str, Any]) -> List[str]:
     return flags
 
 
+def _route_family_for(query: str, intent: str, query_profile: Dict[str, Any]) -> str:
+    lowered = query.lower()
+    if intent == "policy_or_compliance_reasoning":
+        return "policy_reasoning"
+    if intent in {"causal_or_responsibility_reasoning", "entity_relationship_lookup"}:
+        return "relationship_lookup"
+    if query_profile.get("expects_multiple_items") or query_profile.get("requires_broad_coverage"):
+        return "broad_synthesis"
+    if any(token in lowered for token in ("when", "date", "timeline", "schedule", "review", "meeting")):
+        return "temporal_lookup"
+    if intent == "filtered_evidence_search":
+        return "filtered_search"
+    if intent == "synthesis":
+        return "summary_synthesis"
+    return "targeted_lookup"
+
+
+def _orchestration_contract_for(
+    query: str,
+    *,
+    intent: str,
+    query_profile: Dict[str, Any],
+    selector_strategy: str,
+) -> Dict[str, Any]:
+    route_family = _route_family_for(query, intent, query_profile)
+    return {
+        "route_family": route_family,
+        "planner_required": True,
+        "retriever_required": True,
+        "reasoner_required": True,
+        "generator_required": True,
+        "critic_required": True,
+        "tool_owner": {
+            "semantic": "retriever",
+            "fulltext": "retriever",
+            "graph": "retriever",
+        },
+        "validation_owner": "reasoner",
+        "safety_owner": "critic",
+        "memory_sources": ["history", "retrieval_trace", "plan"],
+        "can_short_circuit": not bool(query_profile.get("expects_multiple_items") or query_profile.get("requires_broad_coverage")),
+        "selector_strategy": selector_strategy,
+    }
+
+
 def _tool_plan_for(tool_sequence: List[str]) -> List[Dict[str, str]]:
     purposes = {
         "semantic": "Find conceptually similar chunks and facts.",
@@ -277,6 +322,12 @@ def build_plan(query: str, *, user_id: Optional[str] = None) -> Dict[str, Any]:
     intent = _infer_intent(query, extracted_constraints)
     query_profile = query_shape.analyze_query(query)
     risk_flags = _risk_flags_for(query, extracted_constraints)
+    orchestration = _orchestration_contract_for(
+        query,
+        intent=intent,
+        query_profile=query_profile,
+        selector_strategy=selector["strategy"],
+    )
     if query_profile.get("expects_multiple_items"):
         risk_flags.append("requires_answer_diversity")
     # Enforce both semantic and BM25 for exact-term / policy queries to satisfy playbook.
@@ -297,6 +348,7 @@ def build_plan(query: str, *, user_id: Optional[str] = None) -> Dict[str, Any]:
         "risk_flags": risk_flags,
         "strategy": selector["strategy"],
         "selector": selector,
+        "orchestration": orchestration,
         "agents": list(AGENT_REGISTRY.values()),
         "constraints": {
             "allowed_nodes": graph_query.schema_snapshot()["node_types"],
@@ -407,6 +459,8 @@ def _enough_context(
             coverage["distinct_evidence_count"] >= coverage["minimum_unique_evidence"]
             and coverage["validated_evidence_count"] >= coverage["minimum_unique_evidence"]
         )
+    if (trace or {}).get("query_type") in services.FACT_PRIORITY_QUERY_TYPES and not coverage["has_fact"]:
+        return False
     if coverage["has_fact"] and coverage["has_supporting_doc_or_chunk"]:
         return True
     evidence_refs = services._derive_evidence_refs(retrieval_trace=trace, limit=8)
@@ -633,7 +687,7 @@ def _choose_retry_tool(plan: Dict[str, Any], state: Dict[str, Any], critic: Dict
     return plan.get("tool_sequence", ["graph"])[-1]
 
 
-def run_agentic_query(
+def _legacy_run_agentic_query(
     query: str,
     *,
     user_id: Optional[str] = None,
@@ -928,3 +982,23 @@ def run_agentic_query(
         "thinking": thinking,
         "trace": trace,
     }
+
+
+def run_agentic_query(
+    query: str,
+    *,
+    user_id: Optional[str] = None,
+    history: Optional[List[Dict[str, str]]] = None,
+    event_sink: Optional[AgentEventSink] = None,
+) -> Dict[str, Any]:
+    try:
+        import app.orchestrator as orchestrator
+    except ImportError:  # pragma: no cover - direct execution fallback
+        import orchestrator
+
+    return orchestrator.run_agentic_query(
+        query,
+        user_id=user_id,
+        history=history,
+        event_sink=event_sink,
+    )

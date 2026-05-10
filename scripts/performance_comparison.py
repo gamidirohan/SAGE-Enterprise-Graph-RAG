@@ -43,6 +43,8 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+from threading import Lock
+from collections import deque
 
 # Configure logging
 logging.basicConfig(
@@ -50,6 +52,35 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Rate limiter to avoid GROQ API rate limits
+class RateLimiter:
+    """Thread-safe rate limiter using token bucket algorithm"""
+    def __init__(self, max_requests_per_minute: int = 30):
+        self.max_requests_per_minute = max_requests_per_minute
+        self.min_interval = 60.0 / max_requests_per_minute  # seconds between requests
+        self.last_request_time = 0
+        self.lock = Lock()
+    
+    def wait_if_needed(self):
+        """Wait if necessary to respect rate limit"""
+        with self.lock:
+            elapsed = time.time() - self.last_request_time
+            if elapsed < self.min_interval:
+                wait_time = self.min_interval - elapsed
+                logger.debug(f"Rate limiting: waiting {wait_time:.2f}s")
+                time.sleep(wait_time)
+            self.last_request_time = time.time()
+
+# Global rate limiters for different models
+rate_limiters = {}
+
+def get_rate_limiter(model_name: str) -> RateLimiter:
+    """Get or create a rate limiter for a specific model"""
+    if model_name not in rate_limiters:
+        # Conservative: 30 requests per minute = 2 second minimum between requests
+        rate_limiters[model_name] = RateLimiter(max_requests_per_minute=30)
+    return rate_limiters[model_name]
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
@@ -178,6 +209,7 @@ def get_session(driver):
 def generate_qa_pairs(num_pairs: int = 30) -> List[Dict[str, str]]:
     """Generate question-answer pairs from the graph for evaluation."""
     driver = get_neo4j_driver()
+    get_rate_limiter("deepseek-r1-distill-llama-70b").wait_if_needed()
     llm = ChatGroq(
         model_name="deepseek-r1-distill-llama-70b",
         temperature=0.7,
@@ -237,6 +269,7 @@ def generate_qa_pairs(num_pairs: int = 30) -> List[Dict[str, str]]:
                             document = random.choice(documents)
                             prompt = question_type.format(summary=document["summary"])
 
+                        get_rate_limiter("deepseek-r1-distill-llama-70b").wait_if_needed()
                         question = llm.invoke(prompt).content.strip().strip('"')
                         query_embedding = model.encode(question)
                         vector_results = session.run(
@@ -269,6 +302,7 @@ def generate_qa_pairs(num_pairs: int = 30) -> List[Dict[str, str]]:
 
                         Answer:
                         """
+                        get_rate_limiter("deepseek-r1-distill-llama-70b").wait_if_needed()
                         answer = llm.invoke(answer_prompt).content.strip()
                         qa_pairs.append({"question": question, "answer": answer, "context": context})
                         logger.info(f"Generated QA pair: {question}")
@@ -330,6 +364,7 @@ class RAGSystem:
             model_name = "deepseek-r1-distill-llama-70b"
 
         logger.info(f"Initializing LLM: {model_name}")
+        get_rate_limiter(model_name).wait_if_needed()
         return ChatGroq(
             model_name=model_name,
             temperature=0.0,
@@ -732,6 +767,7 @@ class SAGEGraphRAG(RAGSystem):
             chain = prompt_template | self.llm | StrOutputParser()
 
             # Invoke chain
+            get_rate_limiter(self.llm_model_name).wait_if_needed()
             response = chain.invoke({
                 "query": query,
                 "context": context,
@@ -899,6 +935,7 @@ class TraditionalRAG(RAGSystem):
             chain = prompt_template | self.llm | StrOutputParser()
 
             # Invoke chain
+            get_rate_limiter(self.llm_model_name).wait_if_needed()
             response = chain.invoke({"query": query, "context": context})
 
             return {
@@ -933,6 +970,7 @@ class PerformanceEvaluator:
             model_name = "deepseek-r1-distill-llama-70b"
 
         logger.info(f"Initializing evaluation LLM: {model_name}")
+        get_rate_limiter(model_name).wait_if_needed()
         return ChatGroq(
             model_name=model_name,
             temperature=0.0,
@@ -1037,6 +1075,7 @@ class PerformanceEvaluator:
             chain = prompt_template | self.llm | parser
 
             # Invoke chain
+            get_rate_limiter(self.llm_model_name).wait_if_needed()
             result = chain.invoke({
                 "question": question,
                 "answer1": answer1,

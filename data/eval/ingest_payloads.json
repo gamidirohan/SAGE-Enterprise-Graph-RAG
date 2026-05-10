@@ -1,0 +1,299 @@
+[
+	{
+		"doc_id": "eval-doc-001",
+		"title": "QA: What is the data retention policy for employee records?",
+		"text": "Employee records are retained for 7 years after termination.",
+		"metadata": {
+			"question": "What is the data retention policy for employee records?",
+			"gold_cypher": ["MATCH (d:Document {doc_id:'doc-policy-001'}) RETURN d LIMIT 1"],
+			"source": "pilot"
+		},
+		"author_id": "1"
+	},
+	{
+		"doc_id": "eval-doc-002",
+		"title": "QA: Who does Alice Johnson report to?",
+		"text": "Alice Johnson reports to Bob Smith.",
+		"metadata": {
+			"question": "Who does Alice Johnson report to?",
+			"gold_cypher": ["MATCH (p:Person {name:'Alice Johnson'})-[:REPORTS_TO]->(m:Person) RETURN m LIMIT 1"],
+			"source": "pilot"
+		},
+		"author_id": "2"
+	},
+	{
+		"doc_id": "eval-doc-003",
+		"title": "QA: What is the office address for HQ?",
+		"text": "The HQ office address is 123 Enterprise Way, Suite 400.",
+		"metadata": {
+			"question": "What is the office address for HQ?",
+			"gold_cypher": ["MATCH (d:Document {doc_id:'doc-facility-001'}) RETURN d.address LIMIT 1"],
+			"source": "pilot"
+		},
+		"author_id": "3"
+	},
+	{
+		"doc_id": "eval-doc-004",
+		"title": "QA: Who was the manager of Project Alpha in 2022?",
+		"text": "Bob Smith was the manager of Project Alpha in 2022.",
+		"metadata": {
+			"question": "Who was the manager of Project Alpha in 2022?",
+			"gold_cypher": ["MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(m:Person) WHERE m.role='manager' AND m.tenure_start <= '2022-12-31' RETURN m LIMIT 1"],
+			"source": "pilot"
+		},
+		"author_id": "4"
+	},
+	{
+		"doc_id": "eval-doc-005",
+		"title": "QA: Find all engineers on Project Alpha.",
+		"text": "Engineers on Project Alpha: Bob Smith, Diana Wilson.",
+		"metadata": {
+			"question": "Find all engineers on Project Alpha.",
+			"gold_cypher": ["MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(x:Person) WHERE 'Engineering' IN x.team RETURN x.name LIMIT 10"],
+			"source": "pilot"
+		},
+		"author_id": "5"
+	},
+	{
+		"doc_id": "eval-doc-006",
+		"title": "QA: Summarize differences between Policy A and Policy B.",
+		"text": "Policy A restricts external sharing while Policy B allows sharing with partners under NDA.",
+		"metadata": {
+			"question": "Summarize differences between Policy A and Policy B.",
+			"gold_cypher": ["MATCH (d:Document) WHERE d.doc_id IN ['doc-policy-001','doc-policy-002'] RETURN d LIMIT 2"],
+			"source": "pilot"
+		},
+		"author_id": "6"
+	},
+	{
+		"doc_id": "eval-doc-007",
+		"title": "QA: Does any document contain social security numbers?",
+		"text": "No documents contain social security numbers in the indexed corpus.",
+		"metadata": {
+			"question": "Does any document contain social security numbers?",
+			"gold_cypher": ["MATCH (d:Document) WHERE d.text CONTAINS 'SSN' OR d.text CONTAINS 'social security' RETURN d LIMIT 5"],
+			"source": "pilot"
+		},
+		"author_id": "7"
+	},
+	{
+		"doc_id": "eval-doc-008",
+		"title": "QA: What are the main responsibilities of Alice Johnson?",
+		"text": "Alice Johnson is responsible for data analysis, reporting, and dashboard maintenance.",
+		"metadata": {
+			"question": "What are the main responsibilities of Alice Johnson?",
+			"gold_cypher": ["MATCH (p:Person {name:'Alice Johnson'})-[:RESPONSIBLE_FOR]->(t:Task) RETURN t.name LIMIT 10"],
+			"source": "pilot"
+		},
+		"author_id": "8"
+	},
+	{
+		"doc_id": "eval-doc-009",
+		"title": "QA: What projects is Bob Smith working on?",
+		"text": "Bob Smith is working on Project Alpha and an internal analytics initiative.",
+		"metadata": {
+			"question": "What projects is Bob Smith working on?",
+			"gold_cypher": ["MATCH (p:Person {name:'Bob Smith'})-[:WORKS_ON]->(proj:Project) RETURN proj.name LIMIT 10"],
+			"source": "pilot"
+		},
+		"author_id": "1"
+	},
+	{
+		"doc_id": "eval-doc-010",
+		"title": "QA: What are the deadlines for the current sprint?",
+		"text": "The current sprint deadlines end on 2024-10-15.",
+		"metadata": {
+			"question": "What are the deadlines for the current sprint?",
+			"gold_cypher": ["MATCH (s:Sprint {active:true}) RETURN s.end_date LIMIT 1"],
+			"source": "pilot"
+		},
+		"author_id": "2"
+	},
+	{
+		"doc_id": "eval-doc-011",
+		"title": "QA: Who is responsible for the data analysis task?",
+		"text": "Bob Smith is responsible for the data analysis task.",
+		"metadata": {
+			"question": "Who is responsible for the data analysis task?",
+			"gold_cypher": ["MATCH (t:Task {name:'data analysis'})<-[:RESPONSIBLE_FOR]-(p:Person) RETURN p.name LIMIT 1"],
+			"source": "pilot"
+		},
+		"author_id": "3"
+	},
+	{
+		"doc_id": "eval-doc-012",
+		"title": "QA: List documents mentioning the Q3 roadmap.",
+		"text": "Roadmap documents: doc-roadmap-q3-001, doc-roadmap-q3-002.",
+		"metadata": {
+			"question": "List documents mentioning the Q3 roadmap.",
+			"gold_cypher": ["MATCH (d:Document) WHERE d.title CONTAINS 'Q3 roadmap' RETURN d.doc_id LIMIT 5"],
+			"source": "pilot"
+		},
+		"author_id": "4"
+	},
+	{
+		"doc_id": "eval-doc-013",
+		"title": "QA: Has Project Beta completed its design review?",
+		"text": "Yes, Project Beta completed design review on 2024-08-10.",
+		"metadata": {
+			"question": "Has Project Beta completed its design review?",
+			"gold_cypher": ["MATCH (p:Project {name:'Project Beta'}) RETURN p.design_review_date LIMIT 1"],
+			"source": "pilot"
+		},
+		"author_id": "5"
+	},
+	{
+		"doc_id": "eval-doc-014",
+		"title": "QA: What is the summary of the latest meeting notes?",
+		"text": "The latest meeting focused on deadlines, resourcing, and risk mitigation for Project Alpha.",
+		"metadata": {
+			"question": "What is the summary of the latest meeting notes?",
+			"gold_cypher": ["MATCH (d:Document) WHERE d.type='meeting_notes' RETURN d.summary LIMIT 1"],
+			"source": "pilot"
+		},
+		"author_id": "6"
+	},
+	{
+		"doc_id": "eval-doc-015",
+		"title": "QA: Which team members attended the Product kickoff?",
+		"text": "Attendees: Alice Johnson, Bob Smith, Charlie Davis.",
+		"metadata": {
+			"question": "Which team members attended the Product kickoff?",
+			"gold_cypher": ["MATCH (d:Document {title:'Product Kickoff'})-[:MENTIONS]->(p:Person) RETURN p.name LIMIT 10"],
+			"source": "pilot"
+		},
+		"author_id": "7"
+	},
+	{
+		"doc_id": "eval-doc-016",
+		"title": "QA: Who approved budget for initiative X?",
+		"text": "Diana Wilson approved the budget for initiative X.",
+		"metadata": {
+			"question": "Who approved budget for initiative X?",
+			"gold_cypher": ["MATCH (d:Document {doc_id:'doc-budget-001'})-[:APPROVED_BY]->(p:Person) RETURN p.name LIMIT 1"],
+			"source": "pilot"
+		},
+		"author_id": "8"
+	},
+	{
+		"doc_id": "eval-doc-017",
+		"title": "QA: Give a short synthesis of risk items across Project Alpha.",
+		"text": "Top risks: resource constraints, timeline slippage, integration dependencies.",
+		"metadata": {
+			"question": "Give a short synthesis of risk items across Project Alpha.",
+			"gold_cypher": ["MATCH (d:Document) WHERE d.project='Project Alpha' AND d.type='risk_register' RETURN d.summary LIMIT 3"],
+			"source": "pilot"
+		},
+		"author_id": "1"
+	},
+	{
+		"doc_id": "eval-doc-018",
+		"title": "QA: Is the API we use compliant with policy A?",
+		"text": "The API is not compliant with Policy A due to external sharing rules.",
+		"metadata": {
+			"question": "Is the API we use compliant with policy A?",
+			"gold_cypher": ["MATCH (d:Document {doc_id:'doc-api-001'})-[:VIOLATES]->(policy:Policy {id:'POL-A'}) RETURN d LIMIT 1"],
+			"source": "pilot"
+		},
+		"author_id": "2"
+	},
+	{
+		"doc_id": "eval-doc-019",
+		"title": "QA: What change requests are open for Project Gamma?",
+		"text": "Open change requests: CR-101, CR-102.",
+		"metadata": {
+			"question": "What change requests are open for Project Gamma?",
+			"gold_cypher": ["MATCH (cr:ChangeRequest) WHERE cr.project='Project Gamma' RETURN cr.id LIMIT 10"],
+			"source": "pilot"
+		},
+		"author_id": "3"
+	},
+	{
+		"doc_id": "eval-doc-020",
+		"title": "QA: Which documents reference the term 'data governance'?",
+		"text": "Documents: doc-governance-001, doc-governance-002.",
+		"metadata": {
+			"question": "Which documents reference the term 'data governance'?",
+			"gold_cypher": ["MATCH (d:Document) WHERE d.text CONTAINS 'data governance' RETURN d.doc_id LIMIT 10"],
+			"source": "pilot"
+		},
+		"author_id": "4"
+	},
+	{
+		"doc_id": "eval-doc-021",
+		"title": "QA: Who are the owners of the analytics pipeline?",
+		"text": "Owners: Fiona Lee and George Brown.",
+		"metadata": {
+			"question": "Who are the owners of the analytics pipeline?",
+			"gold_cypher": ["MATCH (p:Person)-[:OWNS]->(s:System {name:'analytics pipeline'}) RETURN p.name LIMIT 10"],
+			"source": "pilot"
+		},
+		"author_id": "5"
+	},
+	{
+		"doc_id": "eval-doc-022",
+		"title": "QA: Provide the top-3 documents that support the statement about vendor X performance.",
+		"text": "Top docs: doc-vendorX-001, doc-vendorX-002, doc-vendorX-003.",
+		"metadata": {
+			"question": "Provide the top-3 documents that support the statement about vendor X performance.",
+			"gold_cypher": ["MATCH (d:Document) WHERE d.title CONTAINS 'vendor X' RETURN d.doc_id LIMIT 3"],
+			"source": "pilot"
+		},
+		"author_id": "6"
+	},
+	{
+		"doc_id": "eval-doc-023",
+		"title": "QA: Are there any unresolved security incidents logged this quarter?",
+		"text": "There is one unresolved incident (INC-2024-45) logged this quarter.",
+		"metadata": {
+			"question": "Are there any unresolved security incidents logged this quarter?",
+			"gold_cypher": ["MATCH (i:Incident) WHERE i.status='open' AND i.logged_at >= '2024-01-01' RETURN i.id LIMIT 10"],
+			"source": "pilot"
+		},
+		"author_id": "7"
+	},
+	{
+		"doc_id": "eval-doc-024",
+		"title": "QA: What is the onboarding checklist for new hires?",
+		"text": "Checklist: access request, training modules, security briefing.",
+		"metadata": {
+			"question": "What is the onboarding checklist for new hires?",
+			"gold_cypher": ["MATCH (d:Document {doc_id:'doc-onboarding-001'}) RETURN d.checklist LIMIT 1"],
+			"source": "pilot"
+		},
+		"author_id": "8"
+	},
+	{
+		"doc_id": "eval-doc-025",
+		"title": "QA: Who approved the last contract with vendor Y?",
+		"text": "Contract was approved by Elijah Parker.",
+		"metadata": {
+			"question": "Who approved the last contract with vendor Y?",
+			"gold_cypher": ["MATCH (c:Contract {vendor:'Vendor Y'})-[:APPROVED_BY]->(p:Person) RETURN p.name LIMIT 1"],
+			"source": "pilot"
+		},
+		"author_id": "1"
+	},
+	{
+		"doc_id": "eval-doc-026",
+		"title": "QA: Summarize the pros and cons of approach Z for migration.",
+		"text": "Pros: faster, lower cost. Cons: higher operational risk and compatibility issues.",
+		"metadata": {
+			"question": "Summarize the pros and cons of approach Z for migration.",
+			"gold_cypher": ["MATCH (d:Document) WHERE d.title CONTAINS 'approach Z' RETURN d.summary LIMIT 2"],
+			"source": "pilot"
+		},
+		"author_id": "2"
+	},
+	{
+		"doc_id": "eval-doc-027",
+		"title": "QA: Are there any privacy policy violations detected in ingested documents?",
+		"text": "No privacy policy violations detected in current corpus.",
+		"metadata": {
+			"question": "Are there any privacy policy violations detected in ingested documents?",
+			"gold_cypher": ["MATCH (d:Document) WHERE d.policy_violations IS NOT NULL RETURN d.doc_id LIMIT 5"],
+			"source": "pilot"
+		},
+		"author_id": "3"
+	}
+]

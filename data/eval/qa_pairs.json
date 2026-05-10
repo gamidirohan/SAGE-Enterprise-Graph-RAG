@@ -1,17 +1,245 @@
 [
   {
-    "question": "Who texted Fiona within the last hour of 2:52 pm on April 19, 2025?",
-    "answer": "There is no information available about who texted Fiona within the last hour of 2:52 pm on April 19, 2025. All relevant messages fall outside this time frame.",
-    "context": "A message in JSON format indicating no information is available about who texted Fiona within the last hour of 2:52 pm on April 19, 2025."
+    "question": "What is the data retention policy for employee records?",
+    "reference": "Employee records are retained for 7 years after termination.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document {doc_id:'doc-policy-001'}) RETURN d LIMIT 1"
+      ]
+    }
   },
   {
-    "question": "What is the message from Sender ID 1 to Receiver ID 'sage' about regarding the deputy manager?",
-    "answer": "The provided context does not contain any information about a message from Sender ID 1 to Receiver ID 'sage' regarding a deputy manager. The messages within the context discuss Fiona's leave and clarifications about her absence, with no mention of a deputy manager.",
-    "context": "A JSON-formatted message from Sender ID 1 to Receiver ID 'sage', asking about Fiona's leave and clarifications about her absence."
+    "question": "Who does Alice Johnson report to?",
+    "reference": "Alice Johnson reports to Bob Smith.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Person {name:'Alice Johnson'})-[:REPORTS_TO]->(m:Person) RETURN m LIMIT 1"
+      ]
+    }
   },
   {
-    "question": "What does the message from Sender ID 1 to Receiver 'sage' on 2025-04-13 request regarding Project Phoenix?",
-    "answer": "There is no information about Project Phoenix in the provided context. The context discusses internal communications regarding Fiona's leave and other messages but does not mention Project Phoenix.",
-    "context": "A JSON-formatted message from Sender ID 1 to Receiver ID 'sage', discussing internal communications about Fiona's leave."
+    "question": "What is the office address for HQ?",
+    "reference": "The HQ office address is 123 Enterprise Way, Suite 400.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document {doc_id:'doc-facility-001'}) RETURN d.address LIMIT 1"
+      ]
+    }
+  },
+  {
+    "question": "Who was the manager of Project Alpha in 2022?",
+    "reference": "Bob Smith was the manager of Project Alpha in 2022.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(m:Person) WHERE m.role='manager' AND m.tenure_start <= '2022-12-31' RETURN m LIMIT 1"
+      ]
+    }
+  },
+  {
+    "question": "Find all engineers on Project Alpha.",
+    "reference": "Engineers on Project Alpha: Bob Smith, Diana Wilson.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(x:Person) WHERE 'Engineering' IN x.team RETURN x.name LIMIT 10"
+      ]
+    }
+  },
+  {
+    "question": "Summarize differences between Policy A and Policy B.",
+    "reference": "Policy A restricts external sharing while Policy B allows sharing with partners under NDA.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document) WHERE d.doc_id IN ['doc-policy-001','doc-policy-002'] RETURN d LIMIT 2"
+      ]
+    }
+  },
+  {
+    "question": "Does any document contain social security numbers?",
+    "reference": "No documents contain social security numbers in the indexed corpus.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document) WHERE d.text CONTAINS 'SSN' OR d.text CONTAINS 'social security' RETURN d LIMIT 5"
+      ]
+    }
+  },
+  {
+    "question": "What are the main responsibilities of Alice Johnson?",
+    "reference": "Alice Johnson is responsible for data analysis, reporting, and dashboard maintenance.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Person {name:'Alice Johnson'})-[:RESPONSIBLE_FOR]->(t:Task) RETURN t.name LIMIT 10"
+      ]
+    }
+  },
+  {
+    "question": "What projects is Bob Smith working on?",
+    "reference": "Bob Smith is working on Project Alpha and an internal analytics initiative.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Person {name:'Bob Smith'})-[:WORKS_ON]->(proj:Project) RETURN proj.name LIMIT 10"
+      ]
+    }
+  },
+  {
+    "question": "What are the deadlines for the current sprint?",
+    "reference": "The current sprint deadlines end on 2024-10-15.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (s:Sprint {active:true}) RETURN s.end_date LIMIT 1"
+      ]
+    }
+  },
+  {
+    "question": "Who is responsible for the data analysis task?",
+    "reference": "Bob Smith is responsible for the data analysis task.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (t:Task {name:'data analysis'})<-[:RESPONSIBLE_FOR]-(p:Person) RETURN p.name LIMIT 1"
+      ]
+    }
+  },
+  {
+    "question": "List documents mentioning the Q3 roadmap.",
+    "reference": "Roadmap documents: doc-roadmap-q3-001, doc-roadmap-q3-002.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document) WHERE d.title CONTAINS 'Q3 roadmap' RETURN d.doc_id LIMIT 5"
+      ]
+    }
+  },
+  {
+    "question": "Has Project Beta completed its design review?",
+    "reference": "Yes, Project Beta completed design review on 2024-08-10.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Project {name:'Project Beta'}) RETURN p.design_review_date LIMIT 1"
+      ]
+    }
+  },
+  {
+    "question": "What is the summary of the latest meeting notes?",
+    "reference": "The latest meeting focused on deadlines, resourcing, and risk mitigation for Project Alpha.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document) WHERE d.type='meeting_notes' RETURN d.summary LIMIT 1"
+      ]
+    }
+  },
+  {
+    "question": "Which team members attended the Product kickoff?",
+    "reference": "Attendees: Alice Johnson, Bob Smith, Charlie Davis.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document {title:'Product Kickoff'})-[:MENTIONS]->(p:Person) RETURN p.name LIMIT 10"
+      ]
+    }
+  },
+  {
+    "question": "Who approved budget for initiative X?",
+    "reference": "Diana Wilson approved the budget for initiative X.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document {doc_id:'doc-budget-001'})-[:APPROVED_BY]->(p:Person) RETURN p.name LIMIT 1"
+      ]
+    }
+  },
+  {
+    "question": "Give a short synthesis of risk items across Project Alpha.",
+    "reference": "Top risks: resource constraints, timeline slippage, integration dependencies.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document) WHERE d.project='Project Alpha' AND d.type='risk_register' RETURN d.summary LIMIT 3"
+      ]
+    }
+  },
+  {
+    "question": "Is the API we use compliant with policy A?",
+    "reference": "The API is not compliant with Policy A due to external sharing rules.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document {doc_id:'doc-api-001'})-[:VIOLATES]->(policy:Policy {id:'POL-A'}) RETURN d LIMIT 1"
+      ]
+    }
+  },
+  {
+    "question": "What change requests are open for Project Gamma?",
+    "reference": "Open change requests: CR-101, CR-102.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (cr:ChangeRequest) WHERE cr.project='Project Gamma' RETURN cr.id LIMIT 10"
+      ]
+    }
+  },
+  {
+    "question": "Which documents reference the term 'data governance'?",
+    "reference": "Documents: doc-governance-001, doc-governance-002.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document) WHERE d.text CONTAINS 'data governance' RETURN d.doc_id LIMIT 10"
+      ]
+    }
+  },
+  {
+    "question": "Who are the owners of the analytics pipeline?",
+    "reference": "Owners: Fiona Lee and George Brown.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Person)-[:OWNS]->(s:System {name:'analytics pipeline'}) RETURN p.name LIMIT 10"
+      ]
+    }
+  },
+  {
+    "question": "Provide the top-3 documents that support the statement about vendor X performance.",
+    "reference": "Top docs: doc-vendorX-001, doc-vendorX-002, doc-vendorX-003.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document) WHERE d.title CONTAINS 'vendor X' RETURN d.doc_id LIMIT 3"
+      ]
+    }
+  },
+  {
+    "question": "Are there any unresolved security incidents logged this quarter?",
+    "reference": "There is one unresolved incident (INC-2024-45) logged this quarter.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (i:Incident) WHERE i.status='open' AND i.logged_at >= '2024-01-01' RETURN i.id LIMIT 10"
+      ]
+    }
+  },
+  {
+    "question": "What is the onboarding checklist for new hires?",
+    "reference": "Checklist: access request, training modules, security briefing.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document {doc_id:'doc-onboarding-001'}) RETURN d.checklist LIMIT 1"
+      ]
+    }
+  },
+  {
+    "question": "Who approved the last contract with vendor Y?",
+    "reference": "Contract was approved by Elijah Parker.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (c:Contract {vendor:'Vendor Y'})-[:APPROVED_BY]->(p:Person) RETURN p.name LIMIT 1"
+      ]
+    }
+  },
+  {
+    "question": "Summarize the pros and cons of approach Z for migration.",
+    "reference": "Pros: faster, lower cost. Cons: higher operational risk and compatibility issues.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document) WHERE d.title CONTAINS 'approach Z' RETURN d.summary LIMIT 2"
+      ]
+    }
+  },
+  {
+    "question": "Are there any privacy policy violations detected in ingested documents?",
+    "reference": "No privacy policy violations detected in current corpus.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document) WHERE d.policy_violations IS NOT NULL RETURN d.doc_id LIMIT 5"
+      ]
+    }
   }
 ]

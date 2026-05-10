@@ -110,6 +110,10 @@ MEET_VERB_PATTERN = re.compile(
     r"\b(?:let'?s|let us|can we|could we|should we|shall we|please)?\s*meet(?:\s+with\s+(?P<counterparty>[^?.!,]+))?\b",
     re.IGNORECASE,
 )
+LLM_FALLBACK_SIGNAL_PATTERN = re.compile(
+    r"\b(comes\s+under|reports?\s+into|managed\s+by|manages|manager|supervisor|lead|owner|owns|blocked\s+by)\b",
+    re.IGNORECASE,
+)
 ASSIGNMENT_START_PATTERN = re.compile(
     rf"\b(?P<subject>{ENTITY_PHRASE_PATTERN})\s+is\s+(?:currently\s+)?(?:assigned\s+to|working\s+on)\s+(?P<object>[^.?!]+)\b",
     re.IGNORECASE,
@@ -345,6 +349,11 @@ def process_text(content: str, context: GroundingContext) -> Dict[str, Any]:
                 return result
 
             _mark_source_status(session, context, "running", None)
+            if not _text_has_saia_signal(cleaned_content):
+                result = _build_no_claims_result(session, context)
+                _finalize_run(session, run_id, context, result, reason="no_claims")
+                return result
+
             claims = extract_claims_from_text(cleaned_content, context, session=session)
             if not claims:
                 # Treat “no claims” as a completed run, not a skip, to align with UI expectations and playbook.
@@ -370,8 +379,11 @@ def process_text(content: str, context: GroundingContext) -> Dict[str, Any]:
 
             _link_message_to_document(session, context)
             for claim in claims:
-                claim["claim_id"] = _make_claim_id(context, claim)
                 claim["canonical_key"] = _build_canonical_key(claim)
+            claims = _dedupe_claim_candidates(claims)
+
+            for claim in claims:
+                claim["claim_id"] = _make_claim_id(context, claim)
                 claim["promotion_status"] = claim.get("promotion_status") or "pending"
                 claim["mutation_action"] = claim.get("mutation_action") or "awaiting_decision"
                 _persist_claim(session, context, claim)
@@ -504,7 +516,7 @@ def _build_reports_to_claim(
         f"{_resolution_label(subject, fallback=report_subject_text)} "
         f"reports to {_resolution_label(obj, fallback=manager_text)}"
     )
-    temporal = normalize_temporal_reference(temporal_text or source_span_text, context.sent_at, context.timezone)
+    temporal = _normalize_reports_to_temporal(temporal_text or source_span_text, context)
     canonical_confidence = 0.95 if subject.entity_id and obj.entity_id else 0.62
     return _base_claim(
         context,
@@ -842,6 +854,7 @@ def extract_claims_from_text(text: str, context: GroundingContext, session: Any 
     claims: List[Dict[str, Any]] = []
     seen: set[str] = set()
     for sentence in sentences:
+        sentence_claims: List[Dict[str, Any]] = []
         for extractor in (
             _extract_request_claims,
             _extract_manager_claims,
@@ -853,13 +866,19 @@ def extract_claims_from_text(text: str, context: GroundingContext, session: Any 
             _extract_commitment_claims,
         ):
             for claim in extractor(sentence, context, session=session):
+                claim.setdefault("extraction_source", "deterministic")
                 dedupe_key = _claim_dedupe_key(claim)
                 if dedupe_key in seen:
                     continue
                 seen.add(dedupe_key)
-                claims.append(claim)
-    if _saia_llm_assist_enabled():
-        for claim in _extract_llm_candidate_claims(text, context, session=session):
+                sentence_claims.append(claim)
+        claims.extend(sentence_claims)
+
+        if sentence_claims or not _span_needs_llm_assist(sentence):
+            continue
+
+        for claim in _extract_llm_candidate_claims(sentence, context, session=session):
+            claim.setdefault("extraction_source", "llm")
             dedupe_key = _claim_dedupe_key(claim)
             if dedupe_key in seen:
                 continue
@@ -975,6 +994,11 @@ def normalize_temporal_reference(text: str, anchor_iso: str, timezone_name: str 
     }
 
 
+def _normalize_reports_to_temporal(text: str, context: GroundingContext) -> Dict[str, Optional[str]]:
+    temporal_text = re.sub(r"\b(?:from\s+now\s+on|now)\b", " ", text, flags=re.IGNORECASE)
+    return normalize_temporal_reference(temporal_text, context.sent_at, context.timezone)
+
+
 def _prepare_text(text: str) -> str:
     normalized = text.replace("’", "'").replace("“", '"').replace("”", '"')
     normalized = re.sub(r"(?m)^>.*$", "", normalized)
@@ -992,6 +1016,36 @@ def _is_source_eligible(context: GroundingContext, text: str) -> bool:
     if context.sender_id.lower() == "sage" and not ALLOW_AI_AUTHORED_EVIDENCE:
         return False
     return True
+
+
+def _text_has_saia_signal(text: str) -> bool:
+    return any(_span_has_deterministic_signal(span) or _span_needs_llm_assist(span) for span in _split_claim_spans(text))
+
+
+def _span_has_deterministic_signal(sentence: str) -> bool:
+    if re.search(r"\breports\s+to\b", sentence, re.IGNORECASE):
+        return True
+    return any(
+        bool(pattern.search(sentence))
+        for pattern in (
+            REQUEST_PATTERN,
+            MANAGER_ASSERTION_PATTERN,
+            REPORTS_TO_PATTERN,
+            APPROVAL_PATTERN,
+            PASSIVE_APPROVAL_PATTERN,
+            STATUS_PATTERN,
+            ASSIGNMENT_START_PATTERN,
+            ASSIGNMENT_END_PATTERN,
+            MEETING_PATTERN,
+            MEET_VERB_PATTERN,
+            FIRST_PERSON_COMMITMENT_PATTERN,
+            NAMED_COMMITMENT_PATTERN,
+        )
+    )
+
+
+def _span_needs_llm_assist(sentence: str) -> bool:
+    return _saia_llm_assist_enabled() and bool(LLM_FALLBACK_SIGNAL_PATTERN.search(sentence))
 
 
 def _extract_request_claims(sentence: str, context: GroundingContext, session: Any = None) -> List[Dict[str, Any]]:
@@ -1044,6 +1098,7 @@ def _extract_reports_to_claims(sentence: str, context: GroundingContext, session
             extraction_confidence=0.96,
             canonical_confidence=0.96 if subject.entity_id and obj.entity_id else 0.55,
             normalized_text=normalized_text,
+            temporal=_normalize_reports_to_temporal(sentence, context),
         )
     ]
 
@@ -1529,6 +1584,58 @@ def _claim_dedupe_key(claim: Dict[str, Any]) -> str:
         claim.get("normalized_text") or "",
     ]
     return "|".join(parts)
+
+
+def _dedupe_claim_candidates(claims: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    winners: Dict[Tuple[str, ...], Dict[str, Any]] = {}
+    order: List[Tuple[str, ...]] = []
+    for claim in claims:
+        key = _canonical_claim_intent_key(claim)
+        current = winners.get(key)
+        if current is None:
+            winners[key] = claim
+            order.append(key)
+            continue
+        if _claim_candidate_score(claim) > _claim_candidate_score(current):
+            winners[key] = claim
+    return [winners[key] for key in order]
+
+
+def _canonical_claim_intent_key(claim: Dict[str, Any]) -> Tuple[str, ...]:
+    claim_type = str(claim.get("claim_type") or "")
+    canonical_key = str(claim.get("canonical_key") or "")
+    subject = str(claim.get("subject_entity_id") or claim.get("subject_key") or claim.get("subject_raw") or "")
+    obj = str(claim.get("object_entity_id") or claim.get("object_key") or claim.get("object_raw") or "")
+    value = _normalize_claim_text(claim.get("value_text") or "")
+    scope = str(claim.get("scope_id") or "")
+
+    if claim_type == "REPORTS_TO":
+        return (claim_type, canonical_key, subject, obj)
+    if claim_type == "MEETING_EVENT":
+        return (claim_type, scope, value, str(claim.get("temporal_start") or ""))
+    return (
+        claim_type,
+        canonical_key,
+        subject,
+        obj,
+        value,
+        str(claim.get("temporal_start") or ""),
+    )
+
+
+def _claim_candidate_score(claim: Dict[str, Any]) -> Tuple[int, int, float, float]:
+    deterministic_score = 1 if claim.get("extraction_source") == "deterministic" else 0
+    temporal_score = 0 if claim.get("claim_type") == "REPORTS_TO" and claim.get("temporal_start") else 1
+    return (
+        deterministic_score,
+        temporal_score,
+        float(claim.get("canonical_confidence") or 0.0),
+        float(claim.get("extraction_confidence") or 0.0),
+    )
+
+
+def _normalize_claim_text(value: str) -> str:
+    return _normalize_whitespace(str(value or "").lower())
 
 
 def _make_claim_id(context: GroundingContext, claim: Dict[str, Any]) -> str:
@@ -2230,6 +2337,27 @@ def _build_result(status: str, claims: Sequence[Dict[str, Any]], canonicalized: 
         "diff_summary": {},
         "impact_summary": {},
         "invalidation_summary": {},
+    }
+
+
+def _build_no_claims_result(session: Any, context: GroundingContext) -> Dict[str, Any]:
+    affected_node_ids = _collect_affected_node_ids(context, [])
+    return {
+        "status": "succeeded",
+        "claims_extracted": 0,
+        "claims_canonicalized": 0,
+        "conflicts_found": 0,
+        "changed_fact_ids": [],
+        "affected_node_ids": affected_node_ids,
+        "invalidated_query_ids": [],
+        "reembed_target_ids": _select_reembed_targets(session, context, []),
+        "diff_summary": {"changed_fact_count": 0, "mutation_counts": {}},
+        "impact_summary": {
+            "affected_node_count": len(affected_node_ids),
+            "changed_fact_count": 0,
+            "reembed_target_count": 0,
+        },
+        "invalidation_summary": {"invalidated_query_count": 0},
     }
 
 

@@ -173,6 +173,25 @@ def test_run_agentic_query_records_tool_calls_and_stops_on_enough_context(monkey
     assert result["trace"]["agentic"]["rounds"][-1]["enough_context"] is True
 
 
+def test_enough_context_requires_fact_for_fact_priority_lookup():
+    trace = {
+        "query_type": "schedule_or_timeline",
+        "evidence": [
+            {"chunk_id": "chunk-review", "rank_score": 0.95, "document": {"doc_id": "doc-review"}},
+            {"chunk_id": "chunk-alpha", "rank_score": 0.9, "document": {"doc_id": "doc-alpha"}},
+        ],
+    }
+    reasoning = {"validated_evidence_count": 2}
+
+    assert agentic._enough_context(trace, reasoning) is False
+
+    trace["evidence"].append(
+        {"fact_id": "fact-meeting", "rank_score": 1.0, "document": {"doc_id": "doc-meeting"}}
+    )
+
+    assert agentic._enough_context(trace, reasoning) is True
+
+
 def test_run_agentic_query_uses_single_retry_when_critic_requests_it(monkeypatch):
     calls = []
 
@@ -271,6 +290,37 @@ def test_build_plan_includes_generic_intent_and_evidence_contract(monkeypatch):
     assert "amount_or_numeric_property" in plan["required_evidence"]
     assert plan["tool_sequence"][0] == "fulltext"
     assert plan["tool_plan"][0]["tool"] == "fulltext"
+    assert plan["orchestration"]["planner_required"] is True
+    assert plan["orchestration"]["critic_required"] is True
+    assert plan["orchestration"]["tool_owner"]["graph"] == "retriever"
+
+
+def test_build_plan_marks_comparison_queries_as_broad_synthesis(monkeypatch):
+    monkeypatch.setattr(
+        agentic.retrieval_selector,
+        "decide_strategy",
+        lambda _query, user_id=None: {
+            "strategy": "semantic",
+            "reasons": ["comparison"],
+            "llm_used": False,
+            "heuristic_confidence": 0.9,
+        },
+    )
+    monkeypatch.setattr(
+        agentic.graph_query,
+        "schema_snapshot",
+        lambda: {"node_types": ["Document", "Chunk", "Person"], "edge_types": ["PART_OF", "REPORTS_TO"]},
+    )
+
+    plan = agentic.build_plan(
+        "Compare Project Beta and Project Gamma based on the chat history.",
+        user_id="u1",
+    )
+
+    assert plan["orchestration"]["route_family"] == "broad_synthesis"
+    assert plan["orchestration"]["planner_required"] is True
+    assert plan["orchestration"]["critic_required"] is True
+    assert plan["orchestration"]["can_short_circuit"] is False
 
 
 def test_run_agentic_query_emits_ordered_agent_events(monkeypatch):
@@ -343,6 +393,11 @@ def test_run_agentic_query_emits_ordered_agent_events(monkeypatch):
     assert event_types[-1] == "run_finished"
     assert result["trace"]["agentic"]["events"] == events
     assert result["trace"]["agentic"]["current_agent"] is None
+    assert result["trace"]["agentic"]["orchestration"]["planner_required"] is True
+    assert result["trace"]["agentic"]["orchestration"]["critic_required"] is True
+    assert result["trace"]["agentic"]["completed_steps"]
+    assert result["trace"]["agentic"]["coverage_status"]["status"] in {"sufficient", "partial", "insufficient"}
+    assert result["trace"]["agentic"]["running_summary"]
 
 
 def test_run_agentic_query_requires_distinct_coverage_for_multi_item_questions(monkeypatch):
@@ -451,3 +506,383 @@ def test_run_agentic_query_requires_distinct_coverage_for_multi_item_questions(m
     assert result["trace"]["agentic"]["rounds"][0]["distinct_evidence_count"] == 1
     assert result["trace"]["agentic"]["rounds"][1]["enough_context"] is True
     assert result["trace"]["agentic"]["rounds"][1]["distinct_evidence_count"] >= 2
+    assert result["trace"]["agentic"]["coverage_status"]["status"] == "sufficient"
+    assert result["trace"]["agentic"]["open_questions"] == []
+
+
+def test_agent_planner_identifies_policy_reasoning_route(monkeypatch):
+    """Verify planner correctly identifies policy_reasoning route family."""
+    monkeypatch.setattr(
+        agentic.graph_query,
+        "schema_snapshot",
+        lambda: {"node_types": ["Policy", "Document", "Chunk"], "edge_types": ["ENFORCED_BY"]},
+    )
+    
+    plan = agentic.build_plan(
+        "What is our data retention policy and how does it comply with GDPR?",
+        user_id="u1",
+    )
+    
+    assert plan["orchestration"]["route_family"] == "policy_reasoning"
+    assert plan["orchestration"]["planner_required"] is True
+    assert plan["orchestration"]["retriever_required"] is True
+    assert plan["orchestration"]["critic_required"] is True
+    assert "fulltext" in plan["tool_sequence"]
+
+
+def test_agent_planner_identifies_relationship_lookup_route(monkeypatch):
+    """Verify planner correctly identifies relationship_lookup route family."""
+    monkeypatch.setattr(
+        agentic.graph_query,
+        "schema_snapshot",
+        lambda: {"node_types": ["Person", "Department"], "edge_types": ["REPORTS_TO", "MANAGES"]},
+    )
+    
+    plan = agentic.build_plan(
+        "Who does John Smith report to?",
+        user_id="u1",
+    )
+    
+    assert plan["orchestration"]["route_family"] == "relationship_lookup"
+    assert plan["orchestration"]["planner_required"] is True
+    assert plan["orchestration"]["retriever_required"] is True
+    assert plan["orchestration"]["reasoner_required"] is True
+
+
+def test_agent_retriever_executes_tool_sequence(monkeypatch):
+    """Verify retriever executes the tool sequence from planner."""
+    tool_executions = []
+    
+    monkeypatch.setattr(
+        agentic.retrieval_selector,
+        "decide_strategy",
+        lambda _query, user_id=None: {
+            "strategy": "semantic",
+            "reasons": ["test"],
+            "llm_used": False,
+            "heuristic_confidence": 0.9,
+        },
+    )
+    
+    def track_retrieve(_query, user_id=None, strategy="hybrid", seed_trace=None):
+        tool_executions.append(strategy)
+        return {
+            "documents": ["ctx"],
+            "trace": {
+                "query_type": "general_search",
+                "user_scoped": bool(user_id),
+                "evidence": [{"chunk_id": "chunk-1", "rank_score": 0.9}],
+                "selector_strategy": strategy,
+            },
+        }
+    
+    monkeypatch.setattr(agentic.vector_search, "retrieve", track_retrieve)
+    monkeypatch.setattr(agentic.rerank, "rerank", lambda documents, trace: {"documents": documents, "trace": trace})
+    monkeypatch.setattr(
+        agentic.graph_query,
+        "expand_retrieval_context",
+        lambda _query, seed_trace=None, user_id=None: {"documents": [], "trace": seed_trace or {"evidence": []}},
+    )
+    monkeypatch.setattr(
+        agentic.services,
+        "generate_groq_response",
+        lambda *_args, **_kwargs: {
+            "answer": "test answer",
+            "answer_payload": {
+                "schema_version": 1,
+                "mode": "short",
+                "reason_code": "direct_lookup",
+                "summary": "test answer",
+                "bullets": [],
+                "explanation": "ok",
+                "evidence_refs": ["chunk:chunk-1"],
+            },
+            "thinking": [],
+            "trace": {"evidence": [{"chunk_id": "chunk-1"}]},
+        },
+    )
+    monkeypatch.setattr(
+        agentic.policy_guard,
+        "evaluate_answer",
+        lambda **_kwargs: {"passed": True, "retryable": False, "issues": [], "grounded_evidence_count": 1, "provenance_count": 1},
+    )
+    
+    result = agentic.run_agentic_query("Test query", user_id="u1")
+    
+    # Retriever should have been called with at least semantic strategy
+    assert len(tool_executions) > 0
+    assert "semantic" in tool_executions
+    assert result["trace"]["agentic"]["tool_calls"]
+
+
+def test_agent_reasoner_validates_evidence_bindings(monkeypatch):
+    """Verify reasoner validates evidence bindings correctly."""
+    monkeypatch.setattr(
+        agentic.retrieval_selector,
+        "decide_strategy",
+        lambda _query, user_id=None: {
+            "strategy": "semantic",
+            "reasons": ["test"],
+            "llm_used": False,
+            "heuristic_confidence": 0.9,
+        },
+    )
+    monkeypatch.setattr(
+        agentic.vector_search,
+        "retrieve",
+        lambda _query, user_id=None, strategy="hybrid", seed_trace=None: {
+            "documents": ["ctx"],
+            "trace": {
+                "query_type": "general_search",
+                "user_scoped": bool(user_id),
+                "evidence": [
+                    {"chunk_id": "chunk-1", "rank_score": 0.95, "document": {"doc_id": "doc-1"}},
+                    {"fact_id": "fact-1", "rank_score": 0.9, "document": {"doc_id": "doc-2"}},
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr(agentic.rerank, "rerank", lambda documents, trace: {"documents": documents, "trace": trace})
+    monkeypatch.setattr(
+        agentic.graph_query,
+        "expand_retrieval_context",
+        lambda _query, seed_trace=None, user_id=None: {"documents": [], "trace": seed_trace or {"evidence": []}},
+    )
+    
+    # Reasoner validates these bindings
+    monkeypatch.setattr(
+        agentic.graph_query,
+        "validate_trace_paths",
+        lambda trace: {
+            "valid": True,
+            "validated_evidence_count": len(trace.get("evidence") or []),
+            "missing_fields": []
+        },
+    )
+    
+    monkeypatch.setattr(
+        agentic.services,
+        "generate_groq_response",
+        lambda *_args, **_kwargs: {
+            "answer": "answer",
+            "answer_payload": {
+                "schema_version": 1,
+                "mode": "short",
+                "reason_code": "direct_lookup",
+                "summary": "answer",
+                "bullets": [],
+                "explanation": "ok",
+                "evidence_refs": ["chunk:chunk-1", "fact:fact-1"],
+            },
+            "thinking": [],
+        },
+    )
+    monkeypatch.setattr(
+        agentic.policy_guard,
+        "evaluate_answer",
+        lambda **_kwargs: {"passed": True, "retryable": False, "issues": [], "grounded_evidence_count": 2, "provenance_count": 2},
+    )
+    
+    result = agentic.run_agentic_query("Test query", user_id="u1")
+    
+    # Reasoner should have validated the evidence
+    assert result["trace"]["agentic"]["reasoner"]["valid"] is True
+    assert result["trace"]["agentic"]["reasoner"]["validated_evidence_count"] == 2
+
+
+def test_agent_generator_creates_grounded_answer(monkeypatch):
+    """Verify generator creates a grounded answer with proper citations."""
+    monkeypatch.setattr(
+        agentic.retrieval_selector,
+        "decide_strategy",
+        lambda _query, user_id=None: {
+            "strategy": "semantic",
+            "reasons": ["test"],
+            "llm_used": False,
+            "heuristic_confidence": 0.9,
+        },
+    )
+    monkeypatch.setattr(
+        agentic.vector_search,
+        "retrieve",
+        lambda _query, user_id=None, strategy="hybrid", seed_trace=None: {
+            "documents": ["Company policy document"],
+            "trace": {
+                "query_type": "general_search",
+                "user_scoped": bool(user_id),
+                "evidence": [{"chunk_id": "chunk-1", "rank_score": 0.9, "document": {"doc_id": "doc-1"}}],
+            },
+        },
+    )
+    monkeypatch.setattr(agentic.rerank, "rerank", lambda documents, trace: {"documents": documents, "trace": trace})
+    monkeypatch.setattr(
+        agentic.graph_query,
+        "expand_retrieval_context",
+        lambda _query, seed_trace=None, user_id=None: {"documents": [], "trace": seed_trace or {"evidence": []}},
+    )
+    monkeypatch.setattr(
+        agentic.services,
+        "generate_groq_response",
+        lambda _query, _documents, user_id=None, retrieval_trace=None: {
+            "answer": "The company policy clearly states employees are entitled to 20 days of annual leave.",
+            "answer_payload": {
+                "schema_version": 1,
+                "mode": "short",
+                "reason_code": "direct_lookup",
+                "summary": "The company policy clearly states employees are entitled to 20 days of annual leave.",
+                "bullets": ["20 days annual leave", "Applies to all full-time employees"],
+                "explanation": "This is directly stated in the company policy document.",
+                "evidence_refs": ["chunk:chunk-1"],
+            },
+            "thinking": ["Found the leave policy in the documents"],
+            "trace": {"user_scoped": bool(user_id), "evidence": retrieval_trace.get("evidence")},
+        },
+    )
+    monkeypatch.setattr(
+        agentic.policy_guard,
+        "evaluate_answer",
+        lambda **_kwargs: {"passed": True, "retryable": False, "issues": [], "grounded_evidence_count": 1, "provenance_count": 1},
+    )
+    
+    result = agentic.run_agentic_query("What is the annual leave policy?", user_id="u1")
+    
+    # Verify generator created a grounded answer
+    assert "annual leave" in result["answer"].lower()
+    assert result["trace"]["agentic"]["generator"]["answer_mode"] == "short"
+    assert result["trace"]["agentic"]["generator"]["reason_code"] == "direct_lookup"
+    assert len(result["thinking"]) > 0
+
+
+def test_agent_critic_validates_answer_grounding(monkeypatch):
+    """Verify critic validates answer grounding and passes well-grounded answers."""
+    monkeypatch.setattr(
+        agentic.retrieval_selector,
+        "decide_strategy",
+        lambda _query, user_id=None: {
+            "strategy": "semantic",
+            "reasons": ["test"],
+            "llm_used": False,
+            "heuristic_confidence": 0.9,
+        },
+    )
+    monkeypatch.setattr(
+        agentic.vector_search,
+        "retrieve",
+        lambda _query, user_id=None, strategy="hybrid", seed_trace=None: {
+            "documents": ["ctx"],
+            "trace": {
+                "query_type": "general_search",
+                "user_scoped": bool(user_id),
+                "evidence": [{"chunk_id": "chunk-1", "rank_score": 0.9, "document": {"doc_id": "doc-1"}}],
+            },
+        },
+    )
+    monkeypatch.setattr(agentic.rerank, "rerank", lambda documents, trace: {"documents": documents, "trace": trace})
+    monkeypatch.setattr(
+        agentic.graph_query,
+        "expand_retrieval_context",
+        lambda _query, seed_trace=None, user_id=None: {"documents": [], "trace": seed_trace or {"evidence": []}},
+    )
+    monkeypatch.setattr(
+        agentic.services,
+        "generate_groq_response",
+        lambda *_args, **_kwargs: {
+            "answer": "test answer",
+            "answer_payload": {
+                "schema_version": 1,
+                "mode": "short",
+                "reason_code": "direct_lookup",
+                "summary": "test answer",
+                "bullets": [],
+                "explanation": "ok",
+                "evidence_refs": ["chunk:chunk-1"],
+            },
+            "thinking": [],
+            "trace": {"evidence": [{"chunk_id": "chunk-1"}]},
+        },
+    )
+    
+    # Critic validates and passes
+    monkeypatch.setattr(
+        agentic.policy_guard,
+        "evaluate_answer",
+        lambda **_kwargs: {
+            "passed": True,
+            "retryable": False,
+            "issues": [],
+            "grounded_evidence_count": 1,
+            "provenance_count": 1
+        },
+    )
+    
+    result = agentic.run_agentic_query("Test query", user_id="u1")
+    
+    # Critic should have validated and passed
+    assert result["trace"]["agentic"]["critic"]["passed"] is True
+    assert result["trace"]["agentic"]["critic"]["grounded_evidence_count"] >= 1
+    assert result["trace"]["agentic"]["status"] == "passed"
+
+
+def test_agent_critic_flags_ungrounded_answer_for_review(monkeypatch):
+    """Verify critic flags ungrounded answers for review."""
+    monkeypatch.setattr(
+        agentic.retrieval_selector,
+        "decide_strategy",
+        lambda _query, user_id=None: {
+            "strategy": "semantic",
+            "reasons": ["test"],
+            "llm_used": False,
+            "heuristic_confidence": 0.9,
+        },
+    )
+    monkeypatch.setattr(
+        agentic.vector_search,
+        "retrieve",
+        lambda _query, user_id=None, strategy="hybrid", seed_trace=None: {
+            "documents": [],
+            "trace": {"query_type": "general_search", "user_scoped": bool(user_id), "evidence": []},
+        },
+    )
+    monkeypatch.setattr(agentic.rerank, "rerank", lambda documents, trace: {"documents": documents, "trace": trace})
+    monkeypatch.setattr(
+        agentic.graph_query,
+        "expand_retrieval_context",
+        lambda _query, seed_trace=None, user_id=None: {"documents": [], "trace": seed_trace or {"evidence": []}},
+    )
+    monkeypatch.setattr(
+        agentic.services,
+        "generate_groq_response",
+        lambda *_args, **_kwargs: {
+            "answer": "Ungrounded answer without evidence",
+            "answer_payload": {
+                "schema_version": 1,
+                "mode": "short",
+                "reason_code": "direct_lookup",
+                "summary": "Ungrounded answer",
+                "bullets": [],
+                "explanation": "ok",
+                "evidence_refs": [],  # No evidence references
+            },
+            "thinking": [],
+        },
+    )
+    
+    # Critic flags as ungrounded and not retryable
+    monkeypatch.setattr(
+        agentic.policy_guard,
+        "evaluate_answer",
+        lambda **_kwargs: {
+            "passed": False,
+            "retryable": False,
+            "issues": ["Answer lacks sufficient grounding"],
+            "grounded_evidence_count": 0,
+            "provenance_count": 0
+        },
+    )
+    
+    result = agentic.run_agentic_query("Test query", user_id="u1")
+    
+    # Critic should have flagged as ungrounded
+    assert result["trace"]["agentic"]["critic"]["passed"] is False
+    assert "grounding" in str(result["trace"]["agentic"]["critic"]["issues"]).lower() or len(result["trace"]["agentic"]["critic"]["issues"]) > 0
+    assert result["trace"]["agentic"]["status"] == "needs_review"

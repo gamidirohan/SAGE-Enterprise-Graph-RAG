@@ -226,12 +226,18 @@ def fulltext_retrieve(query: str, *, user_id: Optional[str] = None) -> Dict[str,
             _ensure_fulltext_indexes(session)
             chunk_rows = [
                 services._prepare_chunk_result(row, focus_terms=focus_terms, reports_to_lookup=reports_to_lookup)
-                for row in session.run(CHUNK_FULLTEXT_QUERY, index_name=CHUNK_FULLTEXT_INDEX, query=query).data()
+                for row in session.run(
+                    CHUNK_FULLTEXT_QUERY,
+                    {"index_name": CHUNK_FULLTEXT_INDEX, "query": query},
+                ).data()
                 if row.get("chunk_id") or row.get("chunk_summary")
             ]
             doc_rows = [
                 services._prepare_chunk_result(row, focus_terms=focus_terms, reports_to_lookup=reports_to_lookup)
-                for row in session.run(DOCUMENT_FULLTEXT_QUERY, index_name=DOCUMENT_FULLTEXT_INDEX, query=query).data()
+                for row in session.run(
+                    DOCUMENT_FULLTEXT_QUERY,
+                    {"index_name": DOCUMENT_FULLTEXT_INDEX, "query": query},
+                ).data()
                 if row.get("chunk_id") or row.get("chunk_summary")
             ]
     except Exception as exc:

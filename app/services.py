@@ -82,20 +82,20 @@ PERSON_GRAPH_VECTOR_QUERY = """
     WHERE c.embedding IS NOT NULL
       AND coalesce(d.conversation_type, '') <> 'sage'
       AND NOT coalesce(d.source, '') STARTS WITH 'sage_'
-    WITH c, d, pd, c.embedding AS chunk_embedding, $query_embedding AS query_embedding
-    WITH c, d, pd,
+    WITH person, c, d, pd, c.embedding AS chunk_embedding, $query_embedding AS query_embedding
+    WITH person, c, d, pd,
          gds.similarity.cosine(chunk_embedding, query_embedding) AS similarity,
          c.timestamp AS chunk_ts,
          d.timestamp AS doc_ts
-    WITH c, d, pd, similarity,
+    WITH person, c, d, pd, similarity,
          coalesce(chunk_ts, doc_ts) AS recency_ts
-    WITH c, d, pd, similarity,
+    WITH person, c, d, pd, similarity,
          recency_ts,
          CASE
              WHEN recency_ts IS NULL THEN 0.0
              ELSE exp(-1.0 * duration.inDays(datetime(recency_ts), datetime()).days / $recency_decay_days) * $recency_boost_max
          END AS recency_weight
-    WITH c, d, pd, similarity + recency_weight AS similarity
+    WITH person, c, d, pd, similarity + recency_weight AS similarity
     ORDER BY similarity DESC
     LIMIT 3
     MATCH (c)-[r]-(n)
@@ -179,12 +179,12 @@ TASK_LOOKUP_PATTERN = re.compile(
     r"\b("
     r"promise|promised|commit|committed|commitment|agreed|supposed to|meant to|"
     r"assigned|assignment|working on|responsible for|deadline|due|by when|"
-    r"send|share|deliver|submit|upload|provide|finish|complete"
+    r"send|sending|share|sharing|deliver|delivering|submit|submitting|upload|uploading|provide|providing|finish|complete"
     r")\b",
     re.IGNORECASE,
 )
 TASK_LIKE_FACT_TYPES = {"TASK_ASSIGNMENT", "ASSIGNMENT_STATE", "MEETING_EVENT"}
-FACT_PRIORITY_QUERY_TYPES = {"task_commitment_lookup"}
+FACT_PRIORITY_QUERY_TYPES = {"task_commitment_lookup", "schedule_or_timeline"}
 ANSWER_PAYLOAD_SCHEMA_VERSION = 1
 ANSWER_MODE_SHORT = "short"
 ANSWER_MODE_LONG = "long"
@@ -456,7 +456,7 @@ def _classify_query(text: str) -> str:
         return "compound_lookup"
     if _contains_first_person(text):
         return "personal_context"
-    if any(token in lowered for token in ("weekend", "today", "tomorrow", "schedule", "meeting", "plan")):
+    if any(token in lowered for token in ("weekend", "today", "tomorrow", "schedule", "meeting", "plan", "review", "when")):
         return "schedule_or_timeline"
     if any(token in lowered for token in ("why", "reason", "cause", "delayed")):
         return "explanation"
@@ -966,10 +966,21 @@ def _prepare_fact_result(
         rank_score += 0.4
     rank_score += recency_boost
 
+    ranked["exact_match"] = bool(exact_match)
+    ranked["fact_priority"] = bool(query_type in FACT_PRIORITY_QUERY_TYPES and fact.get("claim_type") in TASK_LIKE_FACT_TYPES)
     ranked["focus_match_score"] = focus_score
     ranked["recency_boost"] = recency_boost
     ranked["rank_score"] = rank_score
     return ranked
+
+
+def _fact_result_matches_user(item: Dict[str, Any], user_id: Optional[str]) -> bool:
+    if not user_id:
+        return False
+    fact = _serialize_neo4j_entity(item.get("f")) if item.get("f") is not None else dict(item.get("fact") or {})
+    subject_candidate = fact.get("subject_entity_id") or fact.get("subject_key")
+    object_candidate = fact.get("object_entity_id") or fact.get("object_key")
+    return _identity_matches(subject_candidate, user_id) or _identity_matches(object_candidate, user_id)
 
 
 def _combine_ranked_results(
@@ -1009,6 +1020,9 @@ def _build_response_context(documents: List[str], retrieval_trace: Optional[Dict
         if item.get("fact_id"):
             fact = item.get("fact") or {}
             document = item.get("document") or {}
+            relationship_semantics = ""
+            if fact.get("claim_type") == "REPORTS_TO":
+                relationship_semantics = " | Relationship Semantics: subject/person reports to object/manager"
             fact_lines.append(
                 "- "
                 f"Summary: {item.get('fact_summary') or 'No fact summary'} | "
@@ -1021,6 +1035,7 @@ def _build_response_context(documents: List[str], retrieval_trace: Optional[Dict
                 f"Canonical Key: {fact.get('canonical_key') or item.get('related_node', {}).get('display_name') or 'unknown'} | "
                 f"Supporting Document ID: {document.get('doc_id') or 'unknown'} | "
                 f"Similarity: {item.get('similarity', 0)}"
+                f"{relationship_semantics}"
             )
             continue
 
@@ -1169,8 +1184,13 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                     if row.get("fact_id")
                 ]
 
-        vector_results = _merge_ranked_results(person_results, global_results, limit=5)
-        fact_results = _merge_ranked_results(exact_task_fact_results + person_fact_results, global_fact_results, limit=5)
+        if personalized_lookup and query_type in FACT_PRIORITY_QUERY_TYPES:
+            vector_results = _merge_ranked_results(person_results, [], limit=5)
+            fact_results = _merge_ranked_results(exact_task_fact_results + person_fact_results, [], limit=5)
+            fact_results = [item for item in fact_results if _fact_result_matches_user(item, user_id)]
+        else:
+            vector_results = _merge_ranked_results(person_results, global_results, limit=5)
+            fact_results = _merge_ranked_results(exact_task_fact_results + person_fact_results, global_fact_results, limit=5)
         combined_results = _combine_ranked_results(
             vector_results,
             fact_results,
@@ -1184,6 +1204,8 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
 
         for item in combined_results:
             if item.get("fact_id"):
+                if personalized_lookup and query_type in FACT_PRIORITY_QUERY_TYPES and not _fact_result_matches_user(item, user_id):
+                    continue
                 supporting_document = _serialize_neo4j_entity(item.get("d"))
                 fact = _serialize_neo4j_entity(item.get("f"))
                 path_summary = _build_fact_path_summary(personalized_lookup)
@@ -1213,6 +1235,8 @@ def query_graph_with_trace(user_input: str, user_id: Optional[str] = None) -> Di
                     "retrieval_path": path_summary["path"],
                     "hop_count": path_summary["hop_count"],
                     "chunk_id": None,
+                    "exact_match": bool(item.get("exact_match")),
+                    "fact_priority": bool(item.get("fact_priority")),
                     "document": {
                         "doc_id": supporting_document.get("doc_id"),
                         "subject": supporting_document.get("subject"),

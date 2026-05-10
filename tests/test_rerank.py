@@ -1,7 +1,7 @@
 from app import rerank
 
 
-def test_rerank_promotes_query_specific_candidate_with_lexical_fallback(monkeypatch):
+def test_rerank_disables_semantic_reranking_when_cross_encoder_is_unavailable(monkeypatch):
     monkeypatch.setattr(rerank, "_cross_encoder_scores", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")))
 
     trace = {
@@ -39,10 +39,12 @@ def test_rerank_promotes_query_specific_candidate_with_lexical_fallback(monkeypa
 
     result = rerank.rerank([], trace)
 
-    assert result["trace"]["reranker"]["method"] == "lexical"
+    assert result["trace"]["reranker"]["method"] == "unavailable"
+    assert result["trace"]["reranker"]["enabled"] is False
+    assert result["trace"]["reranked"] is False
     assert result["trace"]["result_count"] == 3
-    assert result["trace"]["evidence"][0]["chunk_id"] == "chunk-gen2"
-    assert "Gen 2 firmware" in result["documents"][0]
+    assert result["trace"]["evidence"][0]["chunk_id"] == "chunk-gen1"
+    assert "Gen 1 reset guide" in result["documents"][0]
 
 
 def test_rerank_trims_to_top_k_and_preserves_score_sort_without_query():
@@ -96,4 +98,66 @@ def test_rerank_collapses_duplicate_evidence_and_keeps_distinct_candidate(monkey
 
     assert result["trace"]["result_count"] == 2
     assert result["trace"]["reranker"]["distinct_candidate_count"] == 2
+    assert result["trace"]["reranker"]["method"] == "unavailable"
     assert [item.get("chunk_id") or item.get("fact_id") for item in result["trace"]["evidence"]] == ["chunk-1", "fact-1"]
+
+
+def test_rerank_keeps_exact_fact_match_ahead_of_global_semantic_match(monkeypatch):
+    trace = {
+        "query": "What did I promise to send and by when?",
+        "evidence": [
+            {
+                "fact_id": "fact-global",
+                "fact_summary": "Other user will send Project Alpha budget by 9pm tomorrow.",
+                "rank_score": 9.0,
+                "document": {"doc_id": "doc-global"},
+                "fact": {"claim_type": "TASK_ASSIGNMENT", "canonical_key": "assignment::other"},
+            },
+            {
+                "fact_id": "fact-exact",
+                "fact_summary": "Current user will send Project Alpha budget by 6pm tomorrow.",
+                "rank_score": 1.0,
+                "exact_match": True,
+                "document": {"doc_id": "doc-exact"},
+                "fact": {"claim_type": "TASK_ASSIGNMENT", "canonical_key": "assignment::current"},
+            },
+            {
+                "chunk_id": "chunk-global",
+                "chunk_summary": "Correction: I'll send you the Project Alpha budget by 9pm tomorrow instead.",
+                "rank_score": 8.0,
+                "document": {"doc_id": "doc-chunk"},
+            },
+        ],
+    }
+    monkeypatch.setattr(rerank, "_cross_encoder_scores", lambda *_args, **_kwargs: ([9.0, 1.0, 8.0], "fake"))
+
+    result = rerank.rerank([], trace)
+
+    assert result["trace"]["evidence"][0]["fact_id"] == "fact-exact"
+
+
+def test_rerank_keeps_fact_priority_ahead_of_chunk(monkeypatch):
+    trace = {
+        "query": "When am I sending the Project Alpha budget now?",
+        "evidence": [
+            {
+                "chunk_id": "chunk-old",
+                "chunk_summary": "I'll send you the Project Alpha budget by 6pm tomorrow.",
+                "rank_score": 9.0,
+                "document": {"doc_id": "doc-old"},
+            },
+            {
+                "fact_id": "fact-current",
+                "fact_summary": "Current user will send Project Alpha budget by 9pm tomorrow.",
+                "rank_score": 1.0,
+                "fact_priority": True,
+                "document": {"doc_id": "doc-current"},
+                "fact": {"claim_type": "TASK_ASSIGNMENT", "canonical_key": "assignment::current"},
+            },
+        ],
+    }
+    monkeypatch.setattr(rerank, "_cross_encoder_scores", lambda *_args, **_kwargs: ([9.0, 1.0], "fake"))
+
+    result = rerank.rerank([], trace)
+
+    assert result["trace"]["evidence"][0]["fact_id"] == "fact-current"

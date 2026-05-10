@@ -37,6 +37,14 @@ _LIST_FORMAT_PHRASES = (
     "what are the",
     "who are the",
 )
+_BROAD_SYNTHESIS_PHRASES = (
+    "compare",
+    "detailed summary",
+    "detailed overview",
+    "explain all",
+    "walk me through",
+    "everything we know",
+)
 _FIRST_PERSON_SINGULAR = re.compile(r"\b(i|me|my|mine|myself)\b", re.IGNORECASE)
 _FIRST_PERSON_PLURAL = re.compile(r"\b(we|us|our|ours|ourselves)\b", re.IGNORECASE)
 _PLURAL_INTERROGATIVE_PATTERN = re.compile(
@@ -52,11 +60,12 @@ def _normalize_query(text: str) -> str:
 def analyze_query(text: str) -> Dict[str, Any]:
     normalized = _normalize_query(text)
     contains_multi_phrase = any(phrase in normalized for phrase in _MULTI_ITEM_PHRASES)
+    contains_broad_synthesis = any(phrase in normalized for phrase in _BROAD_SYNTHESIS_PHRASES)
     contains_plural_interrogative = bool(_PLURAL_INTERROGATIVE_PATTERN.search(normalized))
     contains_list_prompt = any(phrase in normalized for phrase in _LIST_FORMAT_PHRASES)
 
-    expects_multiple_items = contains_multi_phrase or contains_plural_interrogative
-    requires_broad_coverage = expects_multiple_items or any(
+    expects_multiple_items = contains_multi_phrase or contains_plural_interrogative or contains_broad_synthesis
+    requires_broad_coverage = expects_multiple_items or contains_broad_synthesis or any(
         re.search(rf"\b{re.escape(token)}\b", normalized)
         for token in _EXHAUSTIVE_PHRASES
     )

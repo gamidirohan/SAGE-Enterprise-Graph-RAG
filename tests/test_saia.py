@@ -55,6 +55,9 @@ class _FakeNameSession:
             "bob": [{"id": "bob-id", "labels": ["Person"]}],
             "alice": [{"id": "alice-id", "labels": ["Person"]}],
             "charlie": [{"id": "charlie-id", "labels": ["Person"]}],
+            "rohan fresh": [{"id": "rohan-fresh-id", "labels": ["Person"]}],
+            "hrithik fresh": [{"id": "hrithik-fresh-id", "labels": ["Person"]}],
+            "anil fresh": [{"id": "anil-fresh-id", "labels": ["Person"]}],
         }.get(str(value).lower(), [])
         return _Result(rows)
 
@@ -317,6 +320,36 @@ def test_extract_claims_from_text_reports_to_uses_person_lookup():
     assert claim["resolution_status"] == "resolved"
 
 
+def test_extract_claims_from_text_reports_to_returns_single_named_claim():
+    context = saia.GroundingContext(
+        source_kind="chat_message",
+        source_doc_id="chat-msg-rohan-fresh",
+        source_message_id="rohan-fresh",
+        linked_message_id=None,
+        sender_id="u1",
+        receiver_ids=["u2"],
+        conversation_id="direct:u1:u2",
+        conversation_type="direct",
+        group_id=None,
+        sent_at="2026-04-01T10:00:00Z",
+    )
+
+    claims = saia.extract_claims_from_text(
+        "Rohan Fresh reports to Hrithik Fresh.",
+        context,
+        session=_FakeNameSession(),
+    )
+
+    report_claims = [claim for claim in claims if claim["claim_type"] == "REPORTS_TO"]
+    assert len(report_claims) == 1
+    assert report_claims[0]["subject_entity_id"] == "rohan-fresh-id"
+    assert report_claims[0]["object_entity_id"] == "hrithik-fresh-id"
+
+
+def test_reports_to_signal_accepts_names_with_numeric_suffixes():
+    assert saia._span_has_deterministic_signal("Rohan Fresh 960 reports to Hrithik Fresh 960.")
+
+
 def test_extract_claims_from_text_supports_named_my_manager_phrase():
     context = saia.GroundingContext(
         source_kind="chat_message",
@@ -524,6 +557,31 @@ def test_extract_claims_from_text_merges_llm_assisted_claims(monkeypatch):
     assert any(claim["claim_type"] == "REPORTS_TO" for claim in claims)
 
 
+def test_extract_claims_from_text_skips_llm_when_rule_claim_exists(monkeypatch):
+    context = saia.GroundingContext(
+        source_kind="chat_message",
+        source_doc_id="chat-msg-rule-first",
+        source_message_id="rule-first",
+        linked_message_id=None,
+        sender_id="u1",
+        receiver_ids=["u2"],
+        conversation_id="direct:u1:u2",
+        conversation_type="direct",
+        group_id=None,
+        sent_at="2026-04-28T12:52:14.996Z",
+    )
+    calls = []
+
+    monkeypatch.setattr(saia, "_saia_llm_assist_enabled", lambda: True)
+    monkeypatch.setattr(saia, "_extract_llm_candidate_claims", lambda *_args, **_kwargs: calls.append(True) or [])
+
+    claims = saia.extract_claims_from_text("Bob reports to Alice.", context, session=_FakeNameSession())
+
+    assert calls == []
+    report_claims = [claim for claim in claims if claim["claim_type"] == "REPORTS_TO"]
+    assert len(report_claims) == 1
+
+
 def test_llm_candidate_without_source_span_uses_safe_fallback():
     context = saia.GroundingContext(
         source_kind="chat_message",
@@ -627,6 +685,28 @@ def test_process_chat_message_confirms_existing_fact_without_creating_duplicate(
     assert any("support_count = coalesce(f.support_count, 0) + 1" in call["query"] and call["params"].get("fact_id") == "fact-existing" for call in session.calls)
 
 
+def test_process_chat_message_plain_text_creates_no_claims_or_facts(monkeypatch):
+    session = _Session()
+    _patch_saia_runtime(monkeypatch, session)
+
+    result = saia.process_chat_message(
+        message_id="m-plain",
+        sender_id="u1",
+        receiver_ids=["u2"],
+        conversation_id="direct:u1:u2",
+        conversation_type="direct",
+        group_id=None,
+        sent_at="2026-04-01T10:00:00Z",
+        content="Hello, thanks for the update.",
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["claims_extracted"] == 0
+    assert result["claims_canonicalized"] == 0
+    assert not any("MERGE (c:Claim {claim_id: $claim_id})" in call["query"] for call in session.calls)
+    assert not any("MERGE (f:CanonicalFact {fact_id: $fact_id})" in call["query"] for call in session.calls)
+
+
 def test_process_chat_message_group_request_creates_claim_but_no_canonical_fact(monkeypatch):
     session = _Session()
     _patch_saia_runtime(monkeypatch, session)
@@ -699,6 +779,61 @@ def test_process_chat_message_supersedes_conflicting_reports_to_fact(monkeypatch
     assert any(call["params"].get("existing_fact_id") == "fact-old" for call in session.calls if "existing_fact_id" in call["params"])
 
 
+def test_process_chat_message_reports_to_now_writes_one_replacement_without_temporal_duplicate(monkeypatch):
+    def handler(query, params, _calls):
+        if "MATCH (p:Person)" in query:
+            return {
+                "rohan fresh": [{"id": "rohan-fresh-id", "labels": ["Person"]}],
+                "hrithik fresh": [{"id": "hrithik-fresh-id", "labels": ["Person"]}],
+                "anil fresh": [{"id": "anil-fresh-id", "labels": ["Person"]}],
+            }.get(str(params.get("value")).lower(), [])
+        if "MATCH (f:CanonicalFact {canonical_key: $canonical_key, status: 'current'}) RETURN f" in query:
+            return [
+                {
+                    "f": _Node(
+                        {
+                            "fact_id": "fact-rohan-hrithik",
+                            "claim_type": "REPORTS_TO",
+                            "predicate": "REPORTS_TO",
+                            "subject_entity_id": "rohan-fresh-id",
+                            "subject_key": "rohan-fresh-id",
+                            "object_entity_id": "hrithik-fresh-id",
+                            "object_key": "hrithik-fresh-id",
+                            "value_text": None,
+                            "temporal_start": None,
+                            "temporal_granularity": "unresolved",
+                        }
+                    )
+                }
+            ]
+        return []
+
+    session = _Session(handler=handler)
+    _patch_saia_runtime(monkeypatch, session)
+
+    result = saia.process_chat_message(
+        message_id="m-rohan-update",
+        sender_id="u9",
+        receiver_ids=["u8"],
+        conversation_id="direct:u8:u9",
+        conversation_type="direct",
+        group_id=None,
+        sent_at="2026-04-01T10:00:00Z",
+        content="Rohan Fresh now reports to Anil Fresh.",
+    )
+
+    fact_writes = [call for call in session.calls if "SET f.canonical_key = $canonical_key" in call["query"]]
+
+    assert result["status"] == "succeeded"
+    assert result["claims_extracted"] == 1
+    assert result["claims_canonicalized"] == 1
+    assert result["conflicts_found"] == 1
+    assert len(fact_writes) == 1
+    assert fact_writes[0]["params"]["temporal_start"] is None
+    assert fact_writes[0]["params"]["object_entity_id"] == "anil-fresh-id"
+    assert any("SUPERSEDED_BY" in call["query"] for call in session.calls)
+
+
 def test_process_message_attachment_links_provenance_without_rewriting_raw_content(monkeypatch):
     def handler(query, params, _calls):
         if "MATCH (p:Person)" in query:
@@ -755,6 +890,33 @@ def test_extract_claims_from_text_group_meeting_supports_plain_hour():
     assert claim["subject_entity_id"] == "g1"
     assert claim["temporal_start"] == "2026-04-02T10:00:00+00:00"
     assert claim["normalized_text"] == "meeting scheduled for 2026-04-02T10:00:00+00:00"
+
+
+def test_extract_claims_from_text_group_meeting_suppresses_llm_duplicate(monkeypatch):
+    context = saia.GroundingContext(
+        source_kind="chat_message",
+        source_doc_id="chat-msg-project-review",
+        source_message_id="project-review",
+        linked_message_id=None,
+        sender_id="u1",
+        receiver_ids=["u2", "u3"],
+        conversation_id="group:g1",
+        conversation_type="group",
+        group_id="g1",
+        sent_at="2026-05-09T10:00:00Z",
+    )
+    calls = []
+
+    monkeypatch.setattr(saia, "_saia_llm_assist_enabled", lambda: True)
+    monkeypatch.setattr(saia, "_extract_llm_candidate_claims", lambda *_args, **_kwargs: calls.append(True) or [])
+
+    claims = saia.extract_claims_from_text("We have a Project Alpha review next Monday at 10am.", context)
+
+    meeting_claims = [claim for claim in claims if claim["claim_type"] == "MEETING_EVENT"]
+    assert calls == []
+    assert len(meeting_claims) == 1
+    assert meeting_claims[0]["value_text"] == "Project Alpha review"
+    assert meeting_claims[0]["temporal_start"] == "2026-05-11T10:00:00+00:00"
 
 
 def test_extract_claims_from_text_supports_meet_verb_with_relative_day():

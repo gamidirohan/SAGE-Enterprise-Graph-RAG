@@ -1,0 +1,66 @@
+[
+  {
+    "id": "1",
+    "name": "Alice Johnson",
+    "email": "alice@example.com",
+    "password": "password123",
+    "avatar": "👩",
+    "team": ["Project Alpha","Marketing"]
+  },
+  {
+    "id": "2",
+    "name": "Bob Smith",
+    "email": "bob@example.com",
+    "password": "password123",
+    "avatar": "👨",
+    "team": ["Project Alpha","Engineering"]
+  },
+  {
+    "id": "3",
+    "name": "Charlie Davis",
+    "email": "charlie@example.com",
+    "password": "password123",
+    "avatar": "🧑",
+    "team": ["Project Beta","Design"]
+  },
+  {
+    "id": "4",
+    "name": "Diana Wilson",
+    "email": "diana@example.com",
+    "password": "password123",
+    "avatar": "👱‍♀️",
+    "team": ["Project Beta","Engineering"]
+  },
+  {
+    "id": "5",
+    "name": "Elijah Parker",
+    "email": "elijah@example.com",
+    "password": "password123",
+    "avatar": "👨‍🦱",
+    "team": ["Project Alpha","Design"]
+  },
+  {
+    "id": "6",
+    "name": "Fiona Lee",
+    "email": "fiona@example.com",
+    "password": "password123",
+    "avatar": "👩‍🦰",
+    "team": ["Project Gamma","Management"]
+  },
+  {
+    "id": "7",
+    "name": "George Brown",
+    "email": "george@example.com",
+    "password": "password123",
+    "avatar": "👨‍🦳",
+    "team": ["Project Gamma","Engineering"]
+  },
+  {
+    "id": "8",
+    "name": "Hannah Garcia",
+    "email": "hannah@example.com",
+    "password": "password123",
+    "avatar": "👩‍🦱",
+    "team": ["Project Beta","Management"]
+  }
+]

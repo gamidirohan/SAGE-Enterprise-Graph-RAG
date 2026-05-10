@@ -1,0 +1,27 @@
+[
+  {
+    "doc_id": "doc-policy-001",
+    "title": "Employee Data Retention Policy",
+    "type": "policy",
+    "summary": "Employee records are retained for 7 years after termination.",
+    "text": "Policy: Employee records retention period is 7 years after termination. Applies to HR and payroll records.",
+    "created_at": "2024-01-10"
+  },
+  {
+    "doc_id": "doc-policy-002",
+    "title": "Data Sharing Policy B",
+    "type": "policy",
+    "summary": "Allows sharing with partners under NDA.",
+    "text": "Policy B permits data sharing with partners if an NDA is in place and data minimization is applied.",
+    "created_at": "2023-11-05"
+  },
+  {
+    "doc_id": "doc-facility-001",
+    "title": "Headquarters Facility Info",
+    "type": "facility",
+    "summary": "HQ address and contact details.",
+    "address": "123 Enterprise Way, Suite 400",
+    "text": "Headquarters: 123 Enterprise Way, Suite 400. Main reception: 555-0100.",
+    "created_at": "2022-05-21"
+  }
+]

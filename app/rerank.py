@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import os
-import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -42,15 +41,6 @@ def _get_cross_encoder(model_name: str = DEFAULT_RERANK_MODEL) -> Any:
             cache_folder=str(MODEL_CACHE_DIR),
             local_files_only=False,
         )
-
-
-def _normalize_token(token: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", token.lower())
-
-
-def _tokenize(text: str) -> List[str]:
-    return [token for token in (_normalize_token(part) for part in re.split(r"\s+", text or "")) if token]
-
 
 def _candidate_text(item: Dict[str, Any]) -> str:
     document = item.get("document") or {}
@@ -107,6 +97,8 @@ def _format_document(item: Dict[str, Any]) -> str:
 
 
 def _normalize_text_fingerprint(value: Any) -> str:
+    import re
+
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
 
 
@@ -134,42 +126,6 @@ def _evidence_fingerprint(item: Dict[str, Any]) -> str:
         return f"doc:{document['doc_id']}"
     return f"unknown:{hash(str(item))}"
 
-
-def _lexical_score(query: str, candidate: Dict[str, Any]) -> float:
-    candidate_text = _candidate_text(candidate)
-    query_tokens = _tokenize(query)
-    candidate_tokens = _tokenize(candidate_text)
-
-    if not query_tokens or not candidate_tokens:
-        return float(candidate.get("rank_score") or candidate.get("similarity") or 0)
-
-    query_set = set(query_tokens)
-    candidate_set = set(candidate_tokens)
-    overlap = len(query_set & candidate_set)
-    coverage = overlap / max(len(query_set), 1)
-    precision = overlap / max(len(candidate_set), 1)
-
-    phrase_bonus = 0.0
-    normalized_query = " ".join(query_tokens)
-    normalized_candidate = " ".join(candidate_tokens)
-    if normalized_query and normalized_query in normalized_candidate:
-        phrase_bonus += 1.0
-
-    bigram_bonus = 0.0
-    query_bigrams = set(zip(query_tokens, query_tokens[1:]))
-    candidate_bigrams = set(zip(candidate_tokens, candidate_tokens[1:]))
-    if query_bigrams:
-        bigram_bonus = len(query_bigrams & candidate_bigrams) / len(query_bigrams)
-
-    id_bonus = 0.0
-    for token in query_set:
-        if any(char.isdigit() for char in token) and token in candidate_set:
-            id_bonus += 0.25
-
-    base_score = float(candidate.get("rank_score") or candidate.get("similarity") or 0)
-    return (coverage * 1.6) + (precision * 0.6) + phrase_bonus + (bigram_bonus * 0.8) + id_bonus + (base_score * 0.15)
-
-
 def _cross_encoder_scores(query: str, evidence: List[Dict[str, Any]]) -> Tuple[List[float], str]:
     model = _get_cross_encoder()
     if model is None:
@@ -185,14 +141,8 @@ def _cross_encoder_scores(query: str, evidence: List[Dict[str, Any]]) -> Tuple[L
 
 
 def _score_evidence(query: str, evidence: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    method = "lexical"
-    model_name = None
-
-    try:
-        scores, model_name = _cross_encoder_scores(query, evidence)
-        method = "cross_encoder"
-    except Exception:
-        scores = [_lexical_score(query, item) for item in evidence]
+    scores, model_name = _cross_encoder_scores(query, evidence)
+    method = "cross_encoder"
 
     scored: List[Dict[str, Any]] = []
     for idx, (item, rerank_score) in enumerate(zip(evidence, scores)):
@@ -207,6 +157,8 @@ def _score_evidence(query: str, evidence: List[Dict[str, Any]]) -> Tuple[List[Di
 
     scored.sort(
         key=lambda item: (
+            bool(item.get("exact_match")),
+            bool(item.get("fact_priority")),
             item.get("rerank_score") or -math.inf,
             item.get("similarity") or item.get("rank_score") or -math.inf,
         ),
@@ -286,7 +238,32 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
         }
         return {"documents": _unique_documents(selected), "trace": reranked_trace}
 
-    scored, metadata = _score_evidence(query, evidence)
+    try:
+        scored, metadata = _score_evidence(query, evidence)
+    except Exception:
+        evidence.sort(key=lambda item: (item.get("rank_score") or item.get("similarity") or 0), reverse=True)
+        selected, distinct_candidates = _select_diverse_evidence(
+            evidence,
+            top_k=min(top_k, len(evidence)),
+        )
+        reranked_trace["evidence"] = selected
+        reranked_trace["result_count"] = len(selected)
+        reranked_trace["max_hop_count"] = max((int(item.get("hop_count") or 0) for item in selected), default=0)
+        reranked_trace["retrieval_path"] = selected[0].get("retrieval_path") if selected else reranked_trace.get("retrieval_path")
+        reranked_trace["no_evidence"] = not selected
+        reranked_trace["evidence_state"] = "no_evidence" if not selected else "partial_evidence" if len(selected) < 2 else "grounded"
+        reranked_trace["reranked"] = False
+        reranked_trace["query_profile"] = query_profile
+        reranked_trace["reranker"] = {
+            "enabled": False,
+            "method": "unavailable",
+            "model": DEFAULT_RERANK_MODEL,
+            "selected_count": len(selected),
+            "candidate_count": len(evidence),
+            "distinct_candidate_count": distinct_candidates,
+        }
+        return {"documents": _unique_documents(selected), "trace": reranked_trace}
+
     selected, distinct_candidates = _select_diverse_evidence(
         scored,
         top_k=min(top_k, len(scored)),

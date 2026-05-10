@@ -1,0 +1,10 @@
+{
+  "llms": [
+    "llama-3.1-8b-instant",
+    "llama-3.3-70b-versatile"
+  ],
+  "embeddings": [
+    "all-mpnet-base-v2",
+    "multi-qa-mpnet-base-dot-v1"
+  ]
+}

@@ -1044,6 +1044,7 @@ def list_conversation_summaries(user_id: str) -> List[Dict[str, Any]]:
                          updated_at,
                          conversation_title,
                          count(DISTINCT unread) AS unread_count
+                    WHERE c.type = 'sage' OR last_message IS NOT NULL
                     RETURN c.id AS id,
                            c.type AS type,
                            c.title AS title,

@@ -34,12 +34,22 @@ def test_graph_vector_queries_exclude_sage_documents():
     assert "NOT coalesce(d.source, '') STARTS WITH 'sage_'" in services.GRAPH_VECTOR_QUERY
     assert "coalesce(d.conversation_type, '') <> 'sage'" in services.PERSON_GRAPH_VECTOR_QUERY
     assert "NOT coalesce(d.source, '') STARTS WITH 'sage_'" in services.PERSON_GRAPH_VECTOR_QUERY
+    assert "WITH person, c, d, pd, c.embedding AS chunk_embedding" in services.PERSON_GRAPH_VECTOR_QUERY
+    assert "WITH person, c, d, pd, similarity + recency_weight AS similarity" in services.PERSON_GRAPH_VECTOR_QUERY
     assert "relationships(path)" not in services.GRAPH_VECTOR_QUERY
     assert "relationships(path)" not in services.PERSON_GRAPH_VECTOR_QUERY
 
 
 def test_classify_query_marks_multi_part_lookup_as_compound():
     assert services._classify_query("What's the new project? When's the orientation? Who all know it so far?") == "compound_lookup"
+
+
+def test_classify_query_marks_review_questions_as_schedule():
+    assert services._classify_query("When is the Project Alpha review?") == "schedule_or_timeline"
+
+
+def test_classify_query_marks_sending_question_as_task_lookup():
+    assert services._classify_query("When am I sending the Project Alpha budget now?") == "task_commitment_lookup"
 
 
 def test_build_answer_payload_converts_iso_utc_timestamps_to_ist():
@@ -255,7 +265,7 @@ def test_query_graph_with_trace_merges_canonical_fact_results(monkeypatch):
     result = services.query_graph_with_trace("What am I supposed to send tomorrow?", user_id="u1")
 
     assert result["trace"]["query_type"] == "task_commitment_lookup"
-    assert result["trace"]["result_count"] == 2
+    assert result["trace"]["result_count"] == 1
     assert result["trace"]["evidence"][0]["fact_id"] == "fact-1"
     assert result["trace"]["evidence"][0]["relationship"] == "CANONICAL_FACT"
     assert result["trace"]["evidence"][0]["fact"]["claim_type"] == "TASK_ASSIGNMENT"
@@ -310,8 +320,56 @@ def test_query_graph_with_trace_prioritizes_exact_task_fact_over_higher_similari
     result = services.query_graph_with_trace("What did I promise to send and by when?", user_id="u1")
 
     assert result["trace"]["query_type"] == "task_commitment_lookup"
+    assert result["trace"]["result_count"] == 1
     assert result["trace"]["evidence"][0]["fact_id"] == "fact-commitment"
-    assert result["trace"]["evidence"][0]["rank_score"] > result["trace"]["evidence"][1]["rank_score"]
+    assert result["trace"]["evidence"][0]["fact_priority"] is True
+
+
+def test_query_graph_with_trace_prioritizes_meeting_fact_for_schedule_lookup(monkeypatch):
+    def handler(query, _params):
+        if "MATCH (c:Chunk)-[:PART_OF]->(d:Document)" in query:
+            return [
+                {
+                    "chunk_id": "chunk-noisy",
+                    "chunk_summary": "Upcoming quarterly review for Project Alpha requires latest figures.",
+                    "d": {"doc_id": "chat-msg-noisy", "subject": "Chat message", "sender": "u3"},
+                    "similarity": 0.95,
+                    "relationship": "PART_OF",
+                    "n": {"id": "u3", "name": "Noisy User", "_labels": ["Person"]},
+                }
+            ]
+        if "MATCH (f:CanonicalFact)" in query:
+            return [
+                {
+                    "fact_id": "fact-meeting",
+                    "fact_summary": "Project Alpha review scheduled for 2026-05-11T10:00:00+00:00",
+                    "f": {
+                        "fact_id": "fact-meeting",
+                        "canonical_key": "meeting::group-alpha::project-alpha-review",
+                        "claim_type": "MEETING_EVENT",
+                        "status": "current",
+                        "subject_key": "group-alpha",
+                        "temporal_start": "2026-05-11T10:00:00+00:00",
+                        "temporal_granularity": "datetime",
+                    },
+                    "d": {"doc_id": "chat-msg-meeting", "subject": "Chat message", "sender": "u1", "source": "chat_message"},
+                    "similarity": 0.5,
+                }
+            ]
+        return []
+
+    session = _DispatchSession(handler)
+    driver = _Driver(session)
+
+    monkeypatch.setattr(services.utils, "create_neo4j_driver", lambda: driver)
+    monkeypatch.setattr(services.utils, "get_cached_embedding_model", lambda: _Model())
+
+    result = services.query_graph_with_trace("When is the Project Alpha review?")
+
+    assert result["trace"]["query_type"] == "schedule_or_timeline"
+    assert result["trace"]["evidence"][0]["fact_id"] == "fact-meeting"
+    assert result["trace"]["evidence"][0]["fact"]["claim_type"] == "MEETING_EVENT"
+    assert result["documents"][0].startswith("Fact Summary: Project Alpha review scheduled")
 
 
 def test_query_graph_with_trace_filters_person_lookup_to_focus_entity(monkeypatch):
@@ -577,6 +635,30 @@ def test_generate_groq_response_builds_fact_first_context(monkeypatch):
     assert captured["retrieval_guidance"].startswith("This is a task or commitment lookup.")
     assert captured["answer_mode"] == "short"
     assert captured["context"].split("\n\n")[0].startswith("Canonical facts")
+
+
+def test_build_response_context_marks_reports_to_object_as_manager():
+    context = services._build_response_context(
+        [],
+        retrieval_trace={
+            "evidence": [
+                {
+                    "fact_id": "fact-1",
+                    "fact_summary": "George Brown reports to Hannah Garcia",
+                    "fact": {
+                        "claim_type": "REPORTS_TO",
+                        "status": "current",
+                        "subject_entity_id": "George Brown",
+                        "object_entity_id": "Hannah Garcia",
+                    },
+                    "document": {"doc_id": "doc-1"},
+                    "similarity": 0.9,
+                }
+            ]
+        },
+    )
+
+    assert "Relationship Semantics: subject/person reports to object/manager" in context
 
 
 def test_generate_groq_response_includes_group_ambiguity_guidance(monkeypatch):
