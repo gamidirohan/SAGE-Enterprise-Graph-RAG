@@ -20,7 +20,14 @@ def test_run_agentic_query_returns_agentic_trace(monkeypatch):
             "trace": {
                 "query_type": "general_search",
                 "user_scoped": bool(user_id),
-                "evidence": [{"chunk_id": "chunk-1", "rank_score": 0.9}],
+                "evidence": [
+                    {
+                        "chunk_id": "chunk-1",
+                        "chunk_summary": "Project Alpha overview.",
+                        "rank_score": 0.9,
+                        "document": {"doc_id": "doc-1", "subject": "Project Alpha"},
+                    }
+                ],
                 "selector_strategy": strategy,
             },
         },
@@ -35,12 +42,12 @@ def test_run_agentic_query_returns_agentic_trace(monkeypatch):
         agentic.services,
         "generate_groq_response",
         lambda _query, _documents, user_id=None, retrieval_trace=None: {
-            "answer": "answer",
+            "answer": "Project Alpha is covered by the retrieved evidence.",
             "answer_payload": {
                 "schema_version": 1,
                 "mode": "short",
                 "reason_code": "direct_lookup",
-                "summary": "answer",
+                "summary": "Project Alpha is covered by the retrieved evidence.",
                 "bullets": [],
                 "explanation": "ok",
                 "evidence_refs": ["chunk:chunk-1"],
@@ -50,9 +57,9 @@ def test_run_agentic_query_returns_agentic_trace(monkeypatch):
         },
     )
 
-    result = agentic.run_agentic_query("Who is my manager?", user_id="u1")
+    result = agentic.run_agentic_query("What is Project Alpha?", user_id="u1")
 
-    assert result["answer"] == "answer"
+    assert result["answer"] == "Project Alpha is covered by the retrieved evidence."
     assert result["trace"]["agentic"]["enabled"] is True
     assert result["trace"]["agentic"]["planner"]["strategy"] in {"semantic", "graph", "fulltext", "hybrid"}
     assert result["trace"]["agentic"]["critic"]["passed"] is True
@@ -101,7 +108,7 @@ def test_run_agentic_query_marks_critic_review_when_answer_is_ungrounded(monkeyp
         },
     )
 
-    result = agentic.run_agentic_query("Who is my manager?", user_id="u1")
+    result = agentic.run_agentic_query("What is Project Alpha?", user_id="u1")
 
     assert result["trace"]["agentic"]["critic"]["passed"] is False
     assert "missing_grounded_uncertainty" in result["trace"]["agentic"]["critic"]["issues"]
@@ -129,7 +136,14 @@ def test_run_agentic_query_records_tool_calls_and_stops_on_enough_context(monkey
                 "trace": {
                     "query_type": "general_search",
                     "user_scoped": bool(user_id),
-                    "evidence": [{"chunk_id": "chunk-1", "rank_score": 0.95, "document": {"doc_id": "doc-1"}}],
+                    "evidence": [
+                        {
+                            "chunk_id": "chunk-1",
+                            "chunk_summary": "Project Alpha overview.",
+                            "rank_score": 0.95,
+                            "document": {"doc_id": "doc-1", "subject": "Project Alpha"},
+                        }
+                    ],
                 },
             }
         return {
@@ -138,8 +152,18 @@ def test_run_agentic_query_records_tool_calls_and_stops_on_enough_context(monkey
                 "query_type": "general_search",
                 "user_scoped": bool(user_id),
                 "evidence": [
-                    {"chunk_id": "chunk-1", "rank_score": 0.95, "document": {"doc_id": "doc-1"}},
-                    {"fact_id": "fact-1", "rank_score": 0.9, "document": {"doc_id": "doc-2"}},
+                    {
+                        "chunk_id": "chunk-1",
+                        "chunk_summary": "Project Alpha overview.",
+                        "rank_score": 0.95,
+                        "document": {"doc_id": "doc-1", "subject": "Project Alpha"},
+                    },
+                    {
+                        "fact_id": "fact-1",
+                        "fact_summary": "Project Alpha is an active project.",
+                        "rank_score": 0.9,
+                        "document": {"doc_id": "doc-2", "subject": "Project Alpha"},
+                    },
                 ],
             },
         }
@@ -151,12 +175,12 @@ def test_run_agentic_query_records_tool_calls_and_stops_on_enough_context(monkey
         agentic.services,
         "generate_groq_response",
         lambda *_args, **_kwargs: {
-            "answer": "answer",
+            "answer": "Project Alpha is covered by the retrieved evidence.",
             "answer_payload": {
                 "schema_version": 1,
                 "mode": "short",
                 "reason_code": "direct_lookup",
-                "summary": "answer",
+                "summary": "Project Alpha is covered by the retrieved evidence.",
                 "bullets": [],
                 "explanation": "ok",
                 "evidence_refs": ["chunk:chunk-1", "fact:fact-1"],
@@ -165,7 +189,7 @@ def test_run_agentic_query_records_tool_calls_and_stops_on_enough_context(monkey
         },
     )
 
-    result = agentic.run_agentic_query("Who is my manager?", user_id="u1")
+    result = agentic.run_agentic_query("What is Project Alpha?", user_id="u1")
 
     assert calls == ["semantic", "fulltext"]
     assert result["trace"]["agentic"]["stop_reason"] == "enough_context"
@@ -280,7 +304,13 @@ def test_run_agentic_query_uses_single_retry_when_critic_requests_it(monkeypatch
             "thinking": [],
         },
     ]
-    monkeypatch.setattr(agentic.services, "generate_groq_response", lambda *_args, **_kwargs: responses.pop(0))
+    generator_feedback = []
+
+    def fake_generate(_query, _documents, user_id=None, retrieval_trace=None):
+        generator_feedback.append(dict((retrieval_trace or {}).get("critic_feedback") or {}))
+        return responses.pop(0)
+
+    monkeypatch.setattr(agentic.services, "generate_groq_response", fake_generate)
     verdicts = [
         {"passed": False, "retryable": True, "issues": ["missing_policy_provenance"], "grounded_evidence_count": 0, "provenance_count": 0},
         {"passed": True, "retryable": False, "issues": [], "grounded_evidence_count": 1, "provenance_count": 1},
@@ -292,6 +322,94 @@ def test_run_agentic_query_uses_single_retry_when_critic_requests_it(monkeypatch
     assert len(calls) >= 2
     assert result["trace"]["agentic"]["stop_reason"].startswith("critic_retry:")
     assert result["trace"]["agentic"]["critic"]["passed"] is True
+    assert result["trace"]["agentic"]["retry_attempted"] is True
+    assert result["trace"]["agentic"]["retry_succeeded"] is True
+    assert result["trace"]["agentic"]["remaining_critic_issues"] == []
+    assert [entry["passed"] for entry in result["trace"]["agentic"]["critic_history"]] == [False, True]
+    assert any("Critic retry:" in item and "succeeded" in item for item in result["thinking"])
+    assert generator_feedback[0] == {}
+    assert generator_feedback[1]["issues"] == ["missing_policy_provenance"]
+    assert generator_feedback[1]["answer"] == "Bijade is your manager."
+
+
+def test_run_agentic_query_exposes_failed_retry_critic_issues(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        agentic.retrieval_selector,
+        "decide_strategy",
+        lambda _query, user_id=None: {
+            "strategy": "semantic",
+            "reasons": ["semantic test"],
+            "llm_used": False,
+            "heuristic_confidence": 0.95,
+        },
+    )
+
+    def fake_retrieve(_query, user_id=None, strategy="hybrid", seed_trace=None):
+        calls.append(strategy)
+        return {
+            "documents": ["ctx after retry"] if len(calls) > 1 else [],
+            "trace": {
+                "query_type": "general_search",
+                "user_scoped": bool(user_id),
+                "evidence": [{"chunk_id": "chunk-retry", "rank_score": 0.9, "document": {"doc_id": "doc-retry"}}]
+                if len(calls) > 1
+                else [],
+            },
+        }
+
+    monkeypatch.setattr(agentic.vector_search, "retrieve", fake_retrieve)
+    monkeypatch.setattr(agentic.graph_query, "expand_retrieval_context", lambda *_args, **_kwargs: {"documents": [], "trace": {"evidence": []}})
+    monkeypatch.setattr(agentic.rerank, "rerank", lambda documents, trace: {"documents": documents, "trace": trace})
+
+    responses = [
+        {
+            "answer": "Charlie is assigned to Project Proton.",
+            "answer_payload": {
+                "schema_version": 1,
+                "mode": "short",
+                "reason_code": "direct_lookup",
+                "summary": "Charlie is assigned to Project Proton.",
+                "bullets": [],
+                "explanation": "ok",
+                "evidence_refs": [],
+            },
+            "thinking": [],
+        },
+        {
+            "answer": "Charlie is assigned to Project Proton.",
+            "answer_payload": {
+                "schema_version": 1,
+                "mode": "short",
+                "reason_code": "direct_lookup",
+                "summary": "Charlie is assigned to Project Proton.",
+                "bullets": [],
+                "explanation": "ok",
+                "evidence_refs": ["chunk:chunk-retry"],
+            },
+            "thinking": [],
+        },
+    ]
+
+    monkeypatch.setattr(agentic.services, "generate_groq_response", lambda *_args, **_kwargs: responses.pop(0))
+    verdicts = [
+        {"passed": False, "retryable": True, "issues": ["missing_required_answer_slot:temporal_end"], "grounded_evidence_count": 0, "provenance_count": 0},
+        {"passed": False, "retryable": False, "issues": ["missing_required_answer_slot:temporal_end"], "grounded_evidence_count": 1, "provenance_count": 1},
+    ]
+    monkeypatch.setattr(agentic.policy_guard, "evaluate_answer", lambda **_kwargs: verdicts.pop(0))
+
+    result = agentic.run_agentic_query("How long is Charlie going to work, and in which project", user_id="u1")
+    agentic_trace = result["trace"]["agentic"]
+
+    assert agentic_trace["status"] == "needs_review"
+    assert agentic_trace["retry_attempted"] is True
+    assert agentic_trace["retry_succeeded"] is False
+    assert agentic_trace["remaining_critic_issues"] == ["missing_required_answer_slot:temporal_end"]
+    assert [entry["passed"] for entry in agentic_trace["critic_history"]] == [False, False]
+    assert agentic_trace["critic_history"][1]["revision"] is True
+    assert any("Critic retry:" in item and "failed" in item for item in result["thinking"])
+    assert any("missing_required_answer_slot:temporal_end" in item for item in result["thinking"])
 
 
 def test_build_plan_includes_generic_intent_and_evidence_contract(monkeypatch):

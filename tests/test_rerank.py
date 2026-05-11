@@ -166,6 +166,63 @@ def test_rerank_keeps_single_reports_to_fact_for_direct_person_lookup(monkeypatc
     assert result["trace"]["evidence"][0]["fact_id"] == "fact-current"
 
 
+def test_rerank_drops_unfocused_evidence_for_direct_attribute_lookup(monkeypatch):
+    trace = {
+        "query": "What is the office address for HQ?",
+        "query_type": "general_search",
+        "query_profile": {"wants_list_format": False, "requires_broad_coverage": False},
+        "evidence": [
+            {
+                "fact_id": "fact-busy",
+                "fact_summary": "Test Alice is busy.",
+                "rank_score": 9.0,
+                "document": {"doc_id": "doc-busy", "content": "Test Alice is busy."},
+                "fact": {"claim_type": "STATUS", "display_summary": "Test Alice is busy."},
+            },
+            {
+                "chunk_id": "chunk-hq",
+                "chunk_summary": "HQ is located at 123 Enterprise Way, Suite 400.",
+                "rank_score": 1.0,
+                "document": {
+                    "doc_id": "doc-hq",
+                    "subject": "HQ facilities",
+                    "content": "HQ is located at 123 Enterprise Way, Suite 400.",
+                },
+            },
+        ],
+    }
+    monkeypatch.setattr(rerank, "_cross_encoder_scores", lambda *_args, **_kwargs: ([9.0, 1.0], "fake"))
+
+    result = rerank.rerank([], trace)
+
+    assert result["trace"]["result_count"] == 1
+    assert result["trace"]["evidence"][0]["chunk_id"] == "chunk-hq"
+
+
+def test_rerank_returns_no_evidence_for_direct_attribute_lookup_when_nothing_matches(monkeypatch):
+    trace = {
+        "query": "What is the office address for HQ?",
+        "query_type": "general_search",
+        "query_profile": {"wants_list_format": False, "requires_broad_coverage": False},
+        "evidence": [
+            {
+                "fact_id": "fact-busy",
+                "fact_summary": "Test Alice is busy.",
+                "rank_score": 9.0,
+                "document": {"doc_id": "doc-busy", "content": "Test Alice is busy."},
+                "fact": {"claim_type": "STATUS", "display_summary": "Test Alice is busy."},
+            },
+        ],
+    }
+    monkeypatch.setattr(rerank, "_cross_encoder_scores", lambda *_args, **_kwargs: ([9.0], "fake"))
+
+    result = rerank.rerank([], trace)
+
+    assert result["trace"]["result_count"] == 0
+    assert result["trace"]["no_evidence"] is True
+    assert result["documents"] == []
+
+
 def test_rerank_keeps_conflicting_current_reports_to_facts(monkeypatch):
     trace = {
         "query": "Who does Rohan report to?",
@@ -328,3 +385,40 @@ def test_rerank_keeps_multiple_current_task_facts_when_recipients_conflict(monke
     assert result["trace"]["task_lookup_ambiguity"]["ambiguous"] is True
     assert result["trace"]["task_lookup_ambiguity"]["reason"] == "multiple_recipients"
     assert {item["fact_id"] for item in result["trace"]["evidence"]} == {"fact-alice", "fact-bijade"}
+
+
+def test_rerank_filters_unfocused_task_facts_for_exact_entity_lookup(monkeypatch):
+    trace = {
+        "query": "From when will Charlie start working on Project Proton?",
+        "query_type": "task_commitment_lookup",
+        "evidence": [
+            {
+                "fact_id": "fact-alpha",
+                "fact_summary": "Alice Johnson will send Project Alpha budget on 2099-05-12T20:00:00+00:00",
+                "rank_score": 9.0,
+                "document": {"doc_id": "doc-alpha"},
+                "fact": {
+                    "claim_type": "TASK_ASSIGNMENT",
+                    "canonical_key": "assignment::direct:1:3::send-project-alpha-budget",
+                    "status": "current",
+                    "subject_entity_id": "1",
+                    "object_entity_id": "3",
+                    "temporal_start": "2099-05-12T20:00:00+00:00",
+                },
+            },
+            {
+                "chunk_id": "chunk-proton",
+                "chunk_summary": "Charlie will work on Project Proton starting tomorrow.",
+                "rank_score": 1.0,
+                "document": {"doc_id": "doc-proton"},
+                "related_node": {"display_name": "Charlie"},
+            },
+        ],
+    }
+    monkeypatch.setattr(rerank, "_cross_encoder_scores", lambda *_args, **_kwargs: ([9.0, 1.0], "fake"))
+
+    result = rerank.rerank([], trace)
+
+    assert result["trace"]["task_lookup_ambiguity"]["ambiguous"] is False
+    assert len(result["trace"]["evidence"]) == 1
+    assert result["trace"]["evidence"][0]["chunk_id"] == "chunk-proton"

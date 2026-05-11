@@ -136,6 +136,41 @@ def test_extract_claims_from_text_supports_progressive_commitment_with_grounding
     assert grounding["references"][1]["raw"] == "you"
 
 
+def test_extract_claims_from_text_resolves_second_person_future_project_assignment(monkeypatch):
+    monkeypatch.setattr(saia, "SAIA_LLM_ASSISTED", False)
+    context = saia.GroundingContext(
+        source_kind="chat_message",
+        source_doc_id="chat-msg-proton",
+        source_message_id="proton",
+        linked_message_id=None,
+        sender_id="manager-id",
+        receiver_ids=["charlie-id"],
+        conversation_id="direct:manager-id:charlie-id",
+        conversation_type="direct",
+        group_id=None,
+        sent_at="2026-05-11T10:00:00Z",
+    )
+
+    claims = saia.extract_claims_from_text(
+        "Hi Charlie, I'll be you manager for project proton, and you'll work on it for 2 months starting tomorrow",
+        context,
+    )
+
+    assignment_claims = [claim for claim in claims if claim["claim_type"] == "ASSIGNMENT_STATE"]
+    reports_to_claims = [claim for claim in claims if claim["claim_type"] == "REPORTS_TO"]
+    assert len(assignment_claims) == 1
+    assignment = assignment_claims[0]
+    assert assignment["subject_entity_id"] == "charlie-id"
+    assert assignment["object_key"] == "project-proton"
+    assert assignment["value_text"] == "active"
+    assert assignment["temporal_start"] == "2026-05-12"
+    assert assignment["temporal_end"] == "2026-07-12"
+    assert assignment["normalized_text"] == "Charlie Id is assigned to Project Proton starting 2026-05-12"
+    assert len(reports_to_claims) == 1
+    assert reports_to_claims[0]["subject_entity_id"] == "charlie-id"
+    assert reports_to_claims[0]["object_entity_id"] == "manager-id"
+
+
 def test_resolve_reference_maps_we_and_us_to_group_scope():
     context = saia.GroundingContext(
         source_kind="chat_message",

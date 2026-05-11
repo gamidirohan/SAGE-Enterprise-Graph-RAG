@@ -221,13 +221,14 @@ def _trace_coverage(
 
 def _infer_intent(query: str, constraints: Dict[str, Any]) -> str:
     lowered = query.lower()
+    profile = query_shape.analyze_query(query)
     if constraints.get("policy_terms") or any(token in lowered for token in ("audit", "compliance", "violation", "violated")):
         return "policy_or_compliance_reasoning"
     if any(token in lowered for token in ("why", "because", "delayed", "blocked", "root cause", "responsible")):
         return "causal_or_responsibility_reasoning"
     if any(token in lowered for token in ("who", "manager", "approved", "approval", "owner")):
         return "entity_relationship_lookup"
-    if any(token in lowered for token in ("list", "show", "find all", "which")):
+    if profile.get("wants_list_format") or any(token in lowered for token in ("list", "show", "find all", "which all")):
         return "filtered_evidence_search"
     if any(token in lowered for token in ("summarize", "explain", "compare")):
         return "synthesis"
@@ -752,6 +753,10 @@ def _choose_retry_tool(plan: Dict[str, Any], state: Dict[str, Any], critic: Dict
         preferred_order = ["fulltext", "semantic", "graph"]
     if "insufficient_answer_coverage" in issues:
         preferred_order = ["fulltext", "graph", "semantic"]
+    if any(str(issue).startswith("missing_required_answer_slot:") for issue in issues) or any(
+        str(issue).startswith("missing_required_answer_relation:") for issue in issues
+    ):
+        preferred_order = ["graph", "fulltext", "semantic"]
     for tool_name in preferred_order:
         if tool_name not in used:
             return tool_name
@@ -930,6 +935,13 @@ def _legacy_run_agentic_query(
     if critic.get("retryable") and not critic.get("passed") and state["retry_count"] < int(plan["constraints"]["max_retries"]):
         retry_tool = _choose_retry_tool(plan, state, critic)
         state["retry_count"] += 1
+        trace_with_feedback = dict(state.get("trace") or {})
+        trace_with_feedback["critic_feedback"] = {
+            "issues": list(critic.get("issues") or []),
+            "answer": ai_result.get("answer") or "",
+            "answer_payload": ai_result.get("answer_payload") or {},
+        }
+        state["trace"] = trace_with_feedback
         _emit_event(
             state,
             event_sink,

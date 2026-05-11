@@ -152,6 +152,7 @@ def _initialize_runtime(
         {
             "current_step": None,
             "completed_steps": [],
+            "critic_history": [],
             "evidence_pool": [],
             "selected_evidence": [],
             "validated_bindings": [],
@@ -366,6 +367,18 @@ def _merged_answer_trace(runtime: OrchestratorState) -> Dict[str, Any]:
     }
 
 
+def _critic_history_entry(critic: Dict[str, Any], *, revision: bool, attempt: int) -> Dict[str, Any]:
+    return {
+        "attempt": attempt,
+        "revision": revision,
+        "passed": bool(critic.get("passed")),
+        "retryable": bool(critic.get("retryable")),
+        "issues": list(critic.get("issues") or []),
+        "grounded_evidence_count": int(critic.get("grounded_evidence_count") or 0),
+        "provenance_count": int(critic.get("provenance_count") or 0),
+    }
+
+
 def _run_critic(runtime: OrchestratorState, *, revision: bool = False) -> AgentObservation:
     action = AgentAction(kind="critic", agent="critic", stage="critic")
     trace = _merged_answer_trace(runtime)
@@ -386,6 +399,8 @@ def _run_critic(runtime: OrchestratorState, *, revision: bool = False) -> AgentO
         trace=trace,
         plan=runtime.state.get("plan"),
     )
+    critic_history = runtime.state.setdefault("critic_history", [])
+    critic_history.append(_critic_history_entry(runtime.critic, revision=revision, attempt=len(critic_history) + 1))
     agentic._emit_event(
         runtime.state,
         runtime.event_sink,
@@ -409,7 +424,13 @@ def _run_critic(runtime: OrchestratorState, *, revision: bool = False) -> AgentO
         action=action,
         status="completed" if runtime.critic.get("passed") else "needs_review",
         summary="Critic passed the answer." if runtime.critic.get("passed") else "Critic requested more evidence.",
-        data={"issues": list(runtime.critic.get("issues") or [])},
+        data={
+            "revision": revision,
+            "retryable": bool(runtime.critic.get("retryable")),
+            "issues": list(runtime.critic.get("issues") or []),
+            "grounded_evidence_count": int(runtime.critic.get("grounded_evidence_count") or 0),
+            "provenance_count": int(runtime.critic.get("provenance_count") or 0),
+        },
     )
     return AgentObservation(action=action, status="completed", message="Critic evaluated answer.", data={"critic": runtime.critic})
 
@@ -424,7 +445,16 @@ def _run_critic_retry(runtime: OrchestratorState) -> bool:
 
     retry_tool = agentic._choose_retry_tool(plan, runtime.state, runtime.critic)
     runtime.state["retry_count"] = int(runtime.state.get("retry_count") or 0) + 1
+    runtime.state["retry_attempted"] = True
+    runtime.state["retry_tool"] = retry_tool
     retry_attempt = len(runtime.state.get("rounds") or []) + 1
+    trace = dict(runtime.state.get("trace") or {})
+    trace["critic_feedback"] = {
+        "issues": list(runtime.critic.get("issues") or []),
+        "answer": runtime.ai_result.get("answer") or "",
+        "answer_payload": runtime.ai_result.get("answer_payload") or {},
+    }
+    runtime.state["trace"] = trace
     agentic._emit_event(
         runtime.state,
         runtime.event_sink,
@@ -446,11 +476,13 @@ def _run_critic_retry(runtime: OrchestratorState) -> bool:
     runtime.state["stop_reason"] = f"critic_retry:{retry_tool}"
     _run_generator(runtime, revision=True)
     _run_critic(runtime, revision=True)
+    runtime.state["retry_succeeded"] = bool(runtime.critic.get("passed"))
     return True
 
 
 def _final_trace(runtime: OrchestratorState) -> Dict[str, Any]:
     trace = _merged_answer_trace(runtime)
+    retry_attempted = bool(runtime.state.get("retry_attempted"))
     trace["agentic"] = {
         "enabled": True,
         "run_id": runtime.state["run_id"],
@@ -475,6 +507,11 @@ def _final_trace(runtime: OrchestratorState) -> Dict[str, Any]:
             "reason_code": (runtime.ai_result.get("answer_payload") or {}).get("reason_code"),
         },
         "critic": runtime.critic,
+        "critic_history": list(runtime.state.get("critic_history") or []),
+        "retry_attempted": retry_attempted,
+        "retry_tool": runtime.state.get("retry_tool"),
+        "retry_succeeded": bool(runtime.state.get("retry_succeeded")) if retry_attempted else None,
+        "remaining_critic_issues": [] if runtime.critic.get("passed") else list(runtime.critic.get("issues") or []),
         "status": "passed" if runtime.critic.get("passed") else "needs_review",
     }
     return trace
@@ -513,6 +550,14 @@ def _thinking(runtime: OrchestratorState) -> List[str]:
             f"Critic verdict: {'pass' if runtime.critic.get('passed') else 'review'}",
         ]
     )
+    if runtime.state.get("retry_attempted"):
+        retry_tool = runtime.state.get("retry_tool") or "retrieval"
+        retry_outcome = "succeeded" if runtime.state.get("retry_succeeded") else "failed"
+        thinking.append(f"Critic retry: attempted via {retry_tool}; {retry_outcome}.")
+    if not runtime.critic.get("passed"):
+        issues = list(runtime.critic.get("issues") or [])
+        if issues:
+            thinking.append(f"Remaining critic issues: {', '.join(issues[:3])}.")
     return thinking
 
 

@@ -90,6 +90,12 @@ MANAGER_ASSERTION_PATTERN = re.compile(
     rf"{ENTITY_PHRASE_PATTERN}|EMP\d{{3}}))?",
     re.IGNORECASE,
 )
+FUTURE_MANAGER_ASSERTION_PATTERN = re.compile(
+    rf"\b(?P<manager>I|you|{ENTITY_PHRASE_PATTERN}|EMP\d{{3}})(?:'ll|\s+will)\s+be\s+"
+    r"(?:your|you|my|the|our)?\s*(?:only\s+|sole\s+|direct\s+)?"
+    r"(?:manager|boss|supervisor|lead)\b",
+    re.IGNORECASE,
+)
 APPROVAL_PATTERN = re.compile(
     rf"\b(?P<subject>{OPTIONAL_SCOPED_ENTITY_PATTERN})\s+(?P<verb>approved|approves|authorized|authorised)\s+(?P<object>[^.?!]+)",
     re.IGNORECASE,
@@ -116,6 +122,11 @@ LLM_FALLBACK_SIGNAL_PATTERN = re.compile(
 )
 ASSIGNMENT_START_PATTERN = re.compile(
     rf"\b(?P<subject>{ENTITY_PHRASE_PATTERN})\s+is\s+(?:currently\s+)?(?:assigned\s+to|working\s+on)\s+(?P<object>[^.?!]+)\b",
+    re.IGNORECASE,
+)
+FUTURE_ASSIGNMENT_START_PATTERN = re.compile(
+    rf"\b(?P<subject>I|you|{ENTITY_PHRASE_PATTERN}|EMP\d{{3}})(?:'ll|\s+will)(?:\s+be)?\s+"
+    r"(?:assigned\s+to|working\s+on|work\s+on)\s+(?P<object>[^.?!]+)\b",
     re.IGNORECASE,
 )
 ASSIGNMENT_END_PATTERN = re.compile(
@@ -535,6 +546,33 @@ def _build_reports_to_claim(
 
 
 def _extract_manager_claims(sentence: str, context: GroundingContext, session: Any = None) -> List[Dict[str, Any]]:
+    future_match = FUTURE_MANAGER_ASSERTION_PATTERN.search(sentence)
+    if future_match:
+        manager_text = _normalize_whitespace(future_match.group("manager"))
+        manager_lower = manager_text.lower()
+        lowered_sentence = sentence.lower()
+        employee_text = ""
+        if manager_lower in FIRST_PERSON_TOKENS:
+            employee_text = "you"
+        elif manager_lower in SECOND_PERSON_TOKENS:
+            employee_text = "I"
+        elif "your" in lowered_sentence or "you manager" in lowered_sentence:
+            employee_text = "you"
+        elif "my" in lowered_sentence:
+            employee_text = "I"
+        if employee_text:
+            return [
+                _build_reports_to_claim(
+                    context,
+                    source_span_text=future_match.group(0),
+                    report_subject_text=employee_text,
+                    manager_text=manager_text,
+                    session=session,
+                    extraction_confidence=0.92,
+                    temporal_text=sentence,
+                )
+            ]
+
     match = MANAGER_ASSERTION_PATTERN.search(sentence)
     if not match:
         return []
@@ -1040,12 +1078,14 @@ def _span_has_deterministic_signal(sentence: str) -> bool:
         for pattern in (
             REQUEST_PATTERN,
             MANAGER_ASSERTION_PATTERN,
+            FUTURE_MANAGER_ASSERTION_PATTERN,
             REPORTS_TO_PATTERN,
             APPROVAL_PATTERN,
             PASSIVE_APPROVAL_PATTERN,
             STATUS_PATTERN,
             ASSIGNMENT_START_PATTERN,
             ASSIGNMENT_END_PATTERN,
+            FUTURE_ASSIGNMENT_START_PATTERN,
             MEETING_PATTERN,
             MEET_VERB_PATTERN,
             FIRST_PERSON_COMMITMENT_PATTERN,
@@ -1201,22 +1241,112 @@ def _extract_status_claims(sentence: str, context: GroundingContext, session: An
     return claims
 
 
+def _add_months(value: date, months: int) -> date:
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _apply_duration_to_temporal(temporal: Dict[str, Optional[str]], text: str) -> Dict[str, Optional[str]]:
+    if not temporal.get("temporal_start"):
+        return temporal
+    duration_match = re.search(r"\bfor\s+(\d+)\s+(day|days|week|weeks|month|months)\b", text, re.IGNORECASE)
+    if not duration_match:
+        return temporal
+
+    value = int(duration_match.group(1))
+    unit = duration_match.group(2).lower()
+    start_text = str(temporal["temporal_start"])
+    try:
+        if "T" in start_text:
+            start_dt = datetime.fromisoformat(start_text.replace("Z", "+00:00"))
+            if unit.startswith("month"):
+                end_dt = datetime.combine(_add_months(start_dt.date(), value), start_dt.timetz())
+            else:
+                days = value * 7 if unit.startswith("week") else value
+                end_dt = start_dt + timedelta(days=days)
+            temporal["temporal_end"] = end_dt.isoformat()
+        else:
+            start_date = datetime.strptime(start_text, "%Y-%m-%d").date()
+            if unit.startswith("month"):
+                end_date = _add_months(start_date, value)
+            else:
+                days = value * 7 if unit.startswith("week") else value
+                end_date = start_date + timedelta(days=days)
+            temporal["temporal_end"] = end_date.isoformat()
+    except ValueError:
+        return temporal
+    return temporal
+
+
+def _extract_assignment_context_target(sentence: str) -> Optional[str]:
+    matches = re.findall(
+        r"\bproject\s+[A-Za-z0-9][A-Za-z0-9_\-]*(?:\s+[A-Za-z0-9][A-Za-z0-9_\-]*){0,4}",
+        sentence,
+        flags=re.IGNORECASE,
+    )
+    if not matches:
+        return None
+    return _normalize_whitespace(matches[-1])
+
+
+def _clean_assignment_target_text(text: str, sentence: str) -> str:
+    cleaned = _normalize_whitespace(text.rstrip(".?!"))
+    cleaned = re.sub(
+        r"\bfor\s+\d+\s+(?:day|days|week|weeks|month|months)\b",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\b(?:starting|beginning|from)\s+"
+        r"(?:today|tomorrow|yesterday|now|next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+        r"in\s+\d+\s+(?:day|days|week|weeks)|\d{4}-\d{2}-\d{2})\b.*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = _normalize_whitespace(cleaned)
+    if cleaned.lower() in NEUTRAL_ANAPHORA_TOKENS:
+        return _extract_assignment_context_target(sentence) or cleaned
+    return cleaned
+
+
+def _clean_assignment_subject_text(text: str) -> str:
+    return re.sub(r"^(?:and|then)\s+", "", _normalize_whitespace(text), flags=re.IGNORECASE)
+
+
 def _extract_assignment_claims(sentence: str, context: GroundingContext, session: Any = None) -> List[Dict[str, Any]]:
     claims: List[Dict[str, Any]] = []
     patterns = (
-        (ASSIGNMENT_END_PATTERN, "inactive", "is no longer assigned to"),
-        (ASSIGNMENT_START_PATTERN, "active", "is assigned to"),
+        (ASSIGNMENT_END_PATTERN, "inactive", "is no longer assigned to", False),
+        (ASSIGNMENT_START_PATTERN, "active", "is assigned to", False),
+        (FUTURE_ASSIGNMENT_START_PATTERN, "active", "is assigned to", True),
     )
-    for pattern, state, template in patterns:
+    for pattern, state, template, allow_subject_pronouns in patterns:
         for match in pattern.finditer(sentence):
-            subject = _resolve_reference(match.group("subject"), context, session=session, allow_pronouns=False)
-            assignment_target = _normalize_whitespace(match.group("object").rstrip(".?!"))
+            subject_text = _clean_assignment_subject_text(match.group("subject"))
+            subject = _resolve_reference(
+                subject_text,
+                context,
+                session=session,
+                allow_pronouns=allow_subject_pronouns,
+            )
+            assignment_target = _clean_assignment_target_text(match.group("object"), sentence)
             target_resolution = _resolve_reference(assignment_target, context, session=session, allow_pronouns=False)
             normalized_target = target_resolution.key or _slugify(assignment_target)
+            temporal = _apply_duration_to_temporal(
+                normalize_temporal_reference(match.group(0), context.sent_at, context.timezone),
+                match.group(0),
+            )
             normalized_text = (
-                f"{_resolution_label(subject, fallback=_slugify(match.group('subject')))} "
+                f"{_resolution_label(subject, fallback=_slugify(subject_text))} "
                 f"{template} {_resolution_label(target_resolution, fallback=normalized_target)}"
             )
+            if temporal.get("temporal_start"):
+                normalized_text += f" starting {temporal['temporal_start']}"
             claim = _base_claim(
                 context,
                 match.group(0),
@@ -1229,6 +1359,7 @@ def _extract_assignment_claims(sentence: str, context: GroundingContext, session
                 extraction_confidence=0.9 if state == "inactive" else 0.88,
                 canonical_confidence=0.86 if subject.key and target_resolution.key else 0.6,
                 normalized_text=normalized_text,
+                temporal=temporal,
             )
             claim["payload_json"] = json.dumps(
                 {
@@ -2881,7 +3012,12 @@ def _render_record_display_text(record: Dict[str, Any], display_names: Dict[str,
         return _normalize_whitespace(f"{subject} is {value_text or 'updated'}")
     if claim_type == "ASSIGNMENT_STATE":
         relation_text = "is no longer assigned to" if value_text == "inactive" else "is assigned to"
-        return _normalize_whitespace(f"{subject} {relation_text} {obj or _humanize_entity_label(payload.get('assignment_target')) or 'Unknown'}")
+        text = f"{subject} {relation_text} {obj or _humanize_entity_label(payload.get('assignment_target')) or 'Unknown'}"
+        if temporal_start:
+            text += f" starting {temporal_start}"
+        if record.get("temporal_end"):
+            text += f" until {record.get('temporal_end')}"
+        return _normalize_whitespace(text)
     if claim_type == "MEETING_EVENT":
         text = value_text or "meeting"
         if temporal_start:

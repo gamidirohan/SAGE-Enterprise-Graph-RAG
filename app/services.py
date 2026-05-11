@@ -258,7 +258,7 @@ DISCOURSE_FIRST_PERSON_PREFIX = re.compile(
 TASK_LOOKUP_PATTERN = re.compile(
     r"\b("
     r"promise|promised|commit|committed|commitment|agreed|supposed to|meant to|"
-    r"assigned|assignment|working on|responsible for|deadline|due|by when|"
+    r"assigned|assignment|working on|work on|responsible for|deadline|due|by when|"
     r"send|sending|share|sharing|deliver|delivering|submit|submitting|upload|uploading|provide|providing|finish|complete"
     r")\b",
     re.IGNORECASE,
@@ -322,10 +322,45 @@ BASIC_VERBATIM_PHRASES = (
     "exact text",
     "copy paste",
 )
-DIRECT_LOOKUP_PREFIX = re.compile(r"^\s*(who|whom|what|when|which|did|do|does|is|are|was|were|am|can)\b", re.IGNORECASE)
+UNSUPPORTED_PERSONAL_ATTACK_TERMS = (
+    "idiot",
+    "stupid",
+    "lazy",
+    "corrupt",
+    "fraud",
+    "fraudster",
+    "steal",
+    "stole",
+    "thief",
+    "hate",
+)
+UNSAFE_PRIVATE_LOOKUP_TERMS = (
+    "password",
+    "secret",
+    "confidential",
+    "home address",
+    "salary",
+)
+FABRICATION_REQUEST_PHRASES = (
+    "make up",
+    "invent",
+    "fabricate",
+    "guess an",
+    "guess the",
+)
+PROMPT_INJECTION_MARKERS = (
+    "ignore previous instructions",
+    "ignore all previous instructions",
+    "system:",
+    "developer:",
+    "you must answer",
+    "always answer",
+)
+DIRECT_LOOKUP_PREFIX = re.compile(r"^\s*(who|whom|what|when|where|which|did|do|does|is|are|was|were|am|can)\b", re.IGNORECASE)
 TIME_LOOKUP_PATTERN = re.compile(r"^\s*(when|by when|what time|what day|what date|which day)\b", re.IGNORECASE)
 QUERY_NAME_PATTERN = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b")
 QUERY_EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+QUERY_ACRONYM_PATTERN = re.compile(r"\b[A-Z0-9][A-Z0-9_\-]{1,}\b")
 QUERY_TOKEN_PATTERN = re.compile(r"\b[a-zA-Z][a-zA-Z0-9_\-]{2,}\b")
 COMPOUND_LOOKUP_PATTERN = re.compile(r"\b(what|when|who|whom|which)\b", re.IGNORECASE)
 QUERY_FOCUS_STOPWORDS = {
@@ -342,6 +377,15 @@ QUERY_FOCUS_STOPWORDS = {
     "and",
     "or",
     "from",
+    "start",
+    "starts",
+    "started",
+    "starting",
+    "work",
+    "works",
+    "worked",
+    "working",
+    "project",
     "into",
     "about",
     "me",
@@ -363,6 +407,7 @@ QUERY_FOCUS_STOPWORDS = {
     "who",
     "whom",
     "what",
+    "which",
     "when",
     "where",
     "why",
@@ -380,6 +425,8 @@ QUERY_FOCUS_STOPWORDS = {
     "would",
     "should",
     "could",
+    "going",
+    "long",
     "tell",
     "show",
     "give",
@@ -544,6 +591,94 @@ def _wants_verbatim_evidence(text: str) -> bool:
     return _contains_phrase(normalized, BASIC_VERBATIM_PHRASES)
 
 
+def _documents_context_text(documents: List[str], retrieval_trace: Optional[Dict[str, Any]] = None) -> str:
+    parts = _extract_context_parts(documents)
+    for item in (retrieval_trace or {}).get("evidence") or []:
+        document = item.get("document") or {}
+        for field in ("subject", "content"):
+            value = document.get(field)
+            if value:
+                parts.append(str(value))
+        if item.get("fact_summary"):
+            parts.append(str(item.get("fact_summary")))
+    return "\n".join(parts)
+
+
+def _has_canonical_fact_evidence(retrieval_trace: Optional[Dict[str, Any]] = None) -> bool:
+    return any(item.get("fact_id") for item in (retrieval_trace or {}).get("evidence") or [])
+
+
+def _build_guarded_abstention_answer(
+    query: str,
+    documents: List[str],
+    *,
+    mode: str,
+    reason_code: str,
+    retrieval_trace: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    normalized_query = _normalize_query_text(query)
+    context = _normalize_query_text(_documents_context_text(documents, retrieval_trace))
+    has_fact = _has_canonical_fact_evidence(retrieval_trace)
+    trace = dict(retrieval_trace or {})
+    evidence = [item for item in (trace.get("evidence") or []) if isinstance(item, dict)]
+    query_type = str(trace.get("query_type") or _classify_query(query))
+    query_profile = dict(trace.get("query_profile") or query_shape.analyze_query(query))
+    focus_terms = _extract_query_focus_terms(query)
+
+    reason: Optional[str] = None
+    if (
+        evidence
+        and focus_terms
+        and _requires_direct_focus_match(query, query_type=query_type, query_profile=query_profile)
+        and not any(_evidence_focus_match_score(item, focus_terms) > 0 for item in evidence)
+    ):
+        reason = "I couldn't find relevant evidence for that lookup."
+    elif any(term in normalized_query for term in UNSUPPORTED_PERSONAL_ATTACK_TERMS):
+        reason = "There is no evidence in the retrieved information to support that claim."
+    elif any(phrase in normalized_query for phrase in FABRICATION_REQUEST_PHRASES):
+        reason = "I cannot make up an answer. There is no evidence in the retrieved information that supports the requested value."
+    elif any(term in normalized_query for term in UNSAFE_PRIVATE_LOOKUP_TERMS) and not has_fact:
+        reason = "There is no evidence in the retrieved information that supports sharing that private or confidential detail."
+    elif any(marker in context for marker in PROMPT_INJECTION_MARKERS) and not has_fact:
+        reason = "The retrieved text contains instruction-like content, but there is no verified evidence that supports the requested claim."
+    elif (
+        not has_fact
+        and any(
+            term in normalized_query
+            for term in (
+                "procurement",
+                "approval",
+                "approvals",
+                "violat",
+                "vendor",
+                "vendors",
+                "manager",
+                "manages",
+                "meeting",
+                "event",
+            )
+        )
+        and any(marker in context for marker in ("no ", "not ", "not mentioned", "not stored", "not part of", "only covers", "only cover"))
+    ):
+        reason = "There is no evidence in the retrieved information that supports a specific answer to that question."
+
+    if reason is None:
+        return None
+
+    answer_payload = _build_answer_payload(
+        mode=mode,
+        reason_code=reason_code,
+        summary=reason,
+        bullets=[],
+        retrieval_trace=retrieval_trace,
+    )
+    return {
+        "answer": answer_payload["summary"],
+        "answer_payload": answer_payload,
+        "thinking": [],
+    }
+
+
 def _extract_verbatim_chat_excerpts(retrieval_trace: Optional[Dict[str, Any]] = None, limit: int = 5) -> List[str]:
     excerpts: List[str] = []
     seen: set[str] = set()
@@ -564,6 +699,8 @@ def _extract_verbatim_chat_excerpts(retrieval_trace: Optional[Dict[str, Any]] = 
 
 def _looks_like_task_lookup(text: str) -> bool:
     lowered = text.lower()
+    if _query_asks_for_assignment_details(text):
+        return True
     if not TASK_LOOKUP_PATTERN.search(text):
         return False
     if any(token in lowered for token in ("promise", "promised", "supposed to", "assigned", "assignment", "working on", "responsible for", "deadline", "due", "by when")):
@@ -734,7 +871,54 @@ def _ensure_sentence(text: str) -> str:
 
 
 def _query_asks_for_time(query: str) -> bool:
-    return bool(TIME_LOOKUP_PATTERN.search(query or ""))
+    normalized = _normalize_query_text(query or "")
+    return bool(
+        TIME_LOOKUP_PATTERN.search(query or "")
+        or normalized.startswith("from when")
+        or normalized.startswith("starting when")
+        or re.search(r"\bwhen\b.*\bstart(?:s|ed|ing)?\b", normalized)
+        or re.search(r"\bstart(?:s|ed|ing)?\b", normalized)
+    )
+
+
+def _query_asks_for_duration(query: str) -> bool:
+    normalized = _normalize_query_text(query or "")
+    return bool(
+        re.search(r"\bhow\s+long\b", normalized)
+        or re.search(r"\b(?:duration|until|ending|ends?|finish(?:es|ed)?|through)\b", normalized)
+    )
+
+
+def _query_asks_for_assignment_target(query: str) -> bool:
+    normalized = _normalize_query_text(query or "")
+    return bool(
+        re.search(r"\b(?:which|what)\s+project\b", normalized)
+        or re.search(r"\bin\s+which\s+project\b", normalized)
+        or re.search(r"\b(?:assigned|assignment|work|working)\b.*\b(?:which|what)\s+project\b", normalized)
+    )
+
+
+def _query_asks_for_assignment_details(query: str) -> bool:
+    normalized = _normalize_query_text(query or "")
+    assignmentish = bool(re.search(r"\b(?:assigned|assignment|work|working|responsible)\b", normalized))
+    return assignmentish and (
+        _query_asks_for_duration(query)
+        or _query_asks_for_assignment_target(query)
+        or _query_asks_for_time(query)
+    )
+
+
+def _query_asks_for_manager(query: str) -> bool:
+    normalized = _normalize_query_text(query or "")
+    return bool(re.search(r"\b(?:manager|boss|supervisor|lead|reports?\s+to)\b", normalized))
+
+
+def _is_object_role_lookup(query: str) -> bool:
+    normalized = _normalize_query_text(query or "")
+    return bool(
+        re.search(r"\b(?:manager|owner|lead|supervisor)\s+of\s+\w", normalized)
+        or re.search(r"\b(?:managed|owned|led|supervised)\s+by\b", normalized)
+    )
 
 
 def _fact_visible_summary(item: Dict[str, Any]) -> str:
@@ -748,12 +932,378 @@ def _fact_visible_summary(item: Dict[str, Any]) -> str:
     )
 
 
+def _summary_mentions_temporal(summary: str, temporal_start: str) -> bool:
+    if not summary or not temporal_start:
+        return False
+    if temporal_start in summary:
+        return True
+    return bool(re.search(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}:\d{2}\b|\b(?:AM|PM|IST|UTC)\b", summary))
+
+
+def _evidence_temporal_value(item: Dict[str, Any], *, slot: str) -> str:
+    fact = item.get("fact") or {}
+    structured = str(fact.get(slot) or "").strip()
+    if structured:
+        return structured
+
+    text_parts: List[str] = []
+    document = item.get("document") or {}
+    for value in (
+        document.get("content"),
+        item.get("fact_summary"),
+        item.get("chunk_summary"),
+    ):
+        if value:
+            text_parts.append(str(value))
+    evidence_text = " ".join(text_parts)
+    if not evidence_text:
+        return ""
+
+    if slot == "temporal_start":
+        match = re.search(
+            r"\b(?:starting|starts?|beginning|begins?|from|scheduled\s+for|due|by|on|at)\s+"
+            r"(?P<value>today|tomorrow|yesterday|now|next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+            r"in\s+\d+\s+(?:day|days|week|weeks)|\d{4}-\d{2}-\d{2}|\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b",
+            evidence_text,
+            flags=re.IGNORECASE,
+        )
+        return _normalize_summary_text(match.group("value")) if match else ""
+
+    if slot == "temporal_end":
+        match = re.search(
+            r"\b(?:until|ending|ends?|through)\s+"
+            r"(?P<value>today|tomorrow|yesterday|now|next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+            r"in\s+\d+\s+(?:day|days|week|weeks)|\d{4}-\d{2}-\d{2})\b",
+            evidence_text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return _normalize_summary_text(match.group("value"))
+        duration_match = re.search(
+            r"\b(?P<value>for\s+\d+\s+(?:day|days|week|weeks|month|months))\b",
+            evidence_text,
+            flags=re.IGNORECASE,
+        )
+        return _normalize_summary_text(duration_match.group("value")) if duration_match else ""
+    return ""
+
+
+def _evidence_duration_value(item: Dict[str, Any]) -> str:
+    text_parts: List[str] = []
+    document = item.get("document") or {}
+    for value in (
+        document.get("content"),
+        item.get("fact_summary"),
+        item.get("chunk_summary"),
+        (item.get("fact") or {}).get("display_summary"),
+    ):
+        if value:
+            text_parts.append(str(value))
+    match = re.search(
+        r"\bfor\s+(?P<value>\d+\s+(?:day|days|week|weeks|month|months|year|years))\b",
+        " ".join(text_parts),
+        flags=re.IGNORECASE,
+    )
+    return _normalize_summary_text(match.group("value")) if match else ""
+
+
+def _format_assignment_start_phrase(value: str) -> str:
+    if not value:
+        return ""
+    if re.match(r"^\d{4}-\d{2}-\d{2}", value) or re.match(r"^\d{1,2}(?::\d{2})?\s*(?:am|pm)$", value, re.IGNORECASE):
+        return f"on {value}"
+    return f"starting {value}"
+
+
+def _assignment_subject_object_labels(item: Dict[str, Any]) -> tuple[str, str]:
+    fact = item.get("fact") or {}
+    visible_summary = _fact_visible_summary(item)
+    subject = _context_entity_label(fact.get("subject_display"))
+    obj = _context_entity_label(fact.get("object_display"))
+    if not subject or not obj:
+        match = re.search(
+            r"(?P<subject>.+?)\s+is\s+(?:assigned\s+to|working\s+on)\s+(?P<object>.+?)(?:\s+starting\b|\s+until\b|\.|$)",
+            visible_summary,
+            re.IGNORECASE,
+        )
+        if match:
+            subject = subject or _normalize_summary_text(match.group("subject"))
+            obj = obj or _normalize_summary_text(match.group("object"))
+
+    subject = subject or _context_entity_label(fact.get("subject_entity_id") or fact.get("subject_key")) or "The person"
+    obj = obj or _context_entity_label(fact.get("object_entity_id") or fact.get("object_key")) or "that assignment"
+    return subject, obj
+
+
+def _assignment_time_visible_summary(item: Dict[str, Any], temporal_start: str) -> str:
+    if not temporal_start:
+        return ""
+    fact = item.get("fact") or {}
+    if str(fact.get("claim_type") or "") != "ASSIGNMENT_STATE":
+        return ""
+
+    subject, obj = _assignment_subject_object_labels(item)
+    return _ensure_sentence(f"{subject} starts working on {obj} {_format_assignment_start_phrase(temporal_start)}")
+
+
+def _assignment_requested_slots_answer(
+    query: str,
+    item: Dict[str, Any],
+    *,
+    mode: str,
+    reason_code: str,
+    retrieval_trace: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    fact = item.get("fact") or {}
+    if str(fact.get("claim_type") or "") != "ASSIGNMENT_STATE":
+        return None
+    if _query_asks_for_manager(query):
+        return None
+
+    asks_duration = _query_asks_for_duration(query)
+    asks_target = _query_asks_for_assignment_target(query)
+    asks_start = _query_asks_for_time(query)
+    if not (asks_duration or asks_target or asks_start):
+        return None
+
+    subject, obj = _assignment_subject_object_labels(item)
+    temporal_start = _evidence_temporal_value(item, slot="temporal_start")
+    temporal_end = _evidence_temporal_value(item, slot="temporal_end")
+    duration = _evidence_duration_value(item)
+
+    if asks_duration:
+        if duration:
+            summary = f"{subject} will work on {obj} for {duration}."
+        elif temporal_start and temporal_end:
+            summary = f"{subject} will work on {obj} from {temporal_start} until {temporal_end}."
+        elif temporal_end:
+            summary = f"{subject} will work on {obj} until {temporal_end}."
+        else:
+            summary = f"{subject} is assigned to {obj}, but I could not find the assignment duration."
+    elif asks_start:
+        summary = _assignment_time_visible_summary(item, temporal_start) or (
+            f"{subject} is assigned to {obj}, but I could not find when the assignment starts."
+        )
+    elif asks_target:
+        summary = f"{subject} is assigned to {obj}."
+    else:
+        return None
+
+    answer_payload = _build_answer_payload(
+        mode=mode,
+        reason_code=reason_code,
+        summary=summary,
+        bullets=[],
+        retrieval_trace=retrieval_trace,
+    )
+    return {
+        "answer": answer_payload["summary"],
+        "answer_payload": answer_payload,
+        "thinking": [],
+    }
+
+
 def _fact_conflict_summary(query_type: str, claim_type: str) -> str:
     if claim_type == "REPORTS_TO" or query_type == "person_lookup":
         return "I found conflicting current reporting relationships for that lookup, so I can't collapse them to one safely."
     if query_type == "schedule_or_timeline":
         return "I found conflicting current schedule evidence for that lookup, so I can't collapse it to one safely."
     return "I found conflicting current evidence for that lookup, so I can't collapse it to one safely."
+
+
+def _object_role_evidence_text(item: Dict[str, Any]) -> str:
+    document = item.get("document") or {}
+    parts = [
+        item.get("fact_summary"),
+        item.get("chunk_summary"),
+        (item.get("fact") or {}).get("display_summary"),
+        document.get("content"),
+        document.get("subject"),
+    ]
+    return _normalize_summary_text(" ".join(str(part) for part in parts if part))
+
+
+def _extract_object_role_fact(text: str) -> Optional[Dict[str, str]]:
+    normalized = _normalize_summary_text(text)
+    if not normalized:
+        return None
+
+    active_pattern = re.compile(
+        r"\b(?P<person>[A-Z][A-Za-z0-9_\-]*(?:\s+[A-Z][A-Za-z0-9_\-]*){0,4})\s+"
+        r"(?:is|was|has\s+been|served\s+as)\s+(?:the\s+)?"
+        r"(?P<role>manager|owner|lead|supervisor)\s+of\s+"
+        r"(?P<object>[A-Z][A-Za-z0-9_\-]*(?:\s+(?!in\b|during\b|for\b)[A-Z][A-Za-z0-9_\-]*){0,5})"
+        r"(?:\s+(?:in|during|for)\s+(?P<time>\d{4}|Q[1-4]\s+\d{4}))?",
+        re.IGNORECASE,
+    )
+    passive_pattern = re.compile(
+        r"\b(?P<object>[A-Z][A-Za-z0-9_\-]*(?:\s+(?!in\b|during\b|for\b)[A-Z][A-Za-z0-9_\-]*){0,5})\s+"
+        r"(?:is|was|has\s+been)\s+(?P<verb>managed|owned|led|supervised)\s+by\s+"
+        r"(?P<person>[A-Z][A-Za-z0-9_\-]*(?:\s+[A-Z][A-Za-z0-9_\-]*){0,4})"
+        r"(?:\s+(?:in|during|for)\s+(?P<time>\d{4}|Q[1-4]\s+\d{4}))?",
+        re.IGNORECASE,
+    )
+
+    match = active_pattern.search(normalized)
+    if match:
+        return {
+            "person": _normalize_summary_text(match.group("person")),
+            "role": _normalize_summary_text(match.group("role")).lower(),
+            "object": _normalize_summary_text(match.group("object").rstrip(".?!")),
+            "time": _normalize_summary_text(match.group("time") or ""),
+        }
+
+    match = passive_pattern.search(normalized)
+    if match:
+        verb_to_role = {
+            "managed": "manager",
+            "owned": "owner",
+            "led": "lead",
+            "supervised": "supervisor",
+        }
+        return {
+            "person": _normalize_summary_text(match.group("person").rstrip(".?!")),
+            "role": verb_to_role.get(_normalize_summary_text(match.group("verb")).lower(), "manager"),
+            "object": _normalize_summary_text(match.group("object")),
+            "time": _normalize_summary_text(match.group("time") or ""),
+        }
+    return None
+
+
+def _object_role_matches_query(role_fact: Dict[str, str], query: str) -> bool:
+    normalized_query = _normalize_query_text(query)
+    role = role_fact.get("role") or ""
+    obj = _normalize_query_text(role_fact.get("object") or "")
+    time_value = _normalize_query_text(role_fact.get("time") or "")
+    if role and role not in normalized_query:
+        return False
+    object_terms = [token for token in obj.split() if token not in QUERY_FOCUS_STOPWORDS]
+    if object_terms and not all(token in normalized_query for token in object_terms):
+        return False
+    if time_value and time_value not in normalized_query:
+        return False
+    return True
+
+
+def _build_object_role_lookup_answer(
+    query: str,
+    evidence: List[Dict[str, Any]],
+    *,
+    mode: str,
+    reason_code: str,
+    retrieval_trace: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not _is_object_role_lookup(query):
+        return None
+
+    for item in evidence:
+        role_fact = _extract_object_role_fact(_object_role_evidence_text(item))
+        if not role_fact or not _object_role_matches_query(role_fact, query):
+            continue
+        time_phrase = f" in {role_fact['time']}" if role_fact.get("time") else ""
+        summary = (
+            f"{role_fact['person']} was the {role_fact['role']} of "
+            f"{role_fact['object']}{time_phrase}."
+        )
+        answer_payload = _build_answer_payload(
+            mode=mode,
+            reason_code=reason_code,
+            summary=summary,
+            bullets=[],
+            retrieval_trace=retrieval_trace,
+        )
+        return {
+            "answer": answer_payload["summary"],
+            "answer_payload": answer_payload,
+            "thinking": [],
+        }
+
+    return None
+
+
+def _reports_to_labels(item: Dict[str, Any]) -> tuple[str, str]:
+    fact = item.get("fact") or {}
+    summary = str(item.get("fact_summary") or fact.get("display_summary") or fact.get("summary") or "")
+    match = re.search(r"(.+?)\s+reports\s+to\s+(.+?)(?:\.|$)", summary, re.IGNORECASE)
+    if match:
+        return _normalize_summary_text(match.group(1)), _normalize_summary_text(match.group(2))
+    return (
+        _context_entity_label(fact.get("subject_display") or fact.get("subject_entity_id") or fact.get("subject_key")),
+        _context_entity_label(fact.get("object_display") or fact.get("object_entity_id") or fact.get("object_key")),
+    )
+
+
+def _build_reports_to_chain_answer(
+    query: str,
+    fact_items: List[Dict[str, Any]],
+    *,
+    mode: str,
+    reason_code: str,
+    retrieval_trace: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    query_profile = dict((retrieval_trace or {}).get("query_profile") or {})
+    if not query_profile.get("requires_multi_hop"):
+        return None
+
+    reports_to_items = [
+        item
+        for item in fact_items
+        if str(((item.get("fact") or {}).get("claim_type")) or "") == "REPORTS_TO"
+        and str(((item.get("fact") or {}).get("status")) or "current") == "current"
+    ]
+    if len(reports_to_items) < 2:
+        return None
+
+    manager_by_subject: Dict[str, str] = {}
+    labels_by_entity: Dict[str, str] = {}
+    for item in reports_to_items:
+        fact = item.get("fact") or {}
+        subject = str(fact.get("subject_entity_id") or fact.get("subject_key") or "").strip()
+        manager = str(fact.get("object_entity_id") or fact.get("object_key") or "").strip()
+        if not subject or not manager:
+            continue
+        subject_label, manager_label = _reports_to_labels(item)
+        manager_by_subject[subject] = manager
+        labels_by_entity[subject] = subject_label or subject
+        labels_by_entity[manager] = manager_label or manager
+
+    if len(manager_by_subject) < 2:
+        return None
+
+    lowered_query = query.lower()
+    start_subject = None
+    for subject, label in labels_by_entity.items():
+        if subject in manager_by_subject and label and label.lower() in lowered_query:
+            start_subject = subject
+            break
+    if start_subject is None:
+        object_ids = set(manager_by_subject.values())
+        start_subject = next((subject for subject in manager_by_subject if subject not in object_ids), None)
+    if start_subject is None:
+        return None
+
+    first_manager = manager_by_subject.get(start_subject)
+    second_manager = manager_by_subject.get(first_manager or "")
+    if not first_manager or not second_manager:
+        return None
+
+    summary = (
+        f"{labels_by_entity.get(start_subject, start_subject)} reports to "
+        f"{labels_by_entity.get(first_manager, first_manager)}, who reports to "
+        f"{labels_by_entity.get(second_manager, second_manager)}."
+    )
+    answer_payload = _build_answer_payload(
+        mode=mode,
+        reason_code=reason_code,
+        summary=summary,
+        bullets=[],
+        retrieval_trace=retrieval_trace,
+    )
+    return {
+        "answer": answer_payload["summary"],
+        "answer_payload": answer_payload,
+        "thinking": [],
+    }
 
 
 def _build_fact_backed_answer(
@@ -768,9 +1318,44 @@ def _build_fact_backed_answer(
     query_profile = dict(trace.get("query_profile") or {})
     evidence = [dict(item) for item in (trace.get("evidence") or []) if isinstance(item, dict)]
     fact_items = [item for item in evidence if item.get("fact_id")]
+    reports_to_items = [
+        item
+        for item in fact_items
+        if str(((item.get("fact") or {}).get("claim_type")) or "") == "REPORTS_TO"
+        and str(((item.get("fact") or {}).get("status")) or "current") == "current"
+    ]
+    assignment_items = [
+        item
+        for item in fact_items
+        if str(((item.get("fact") or {}).get("claim_type")) or "") == "ASSIGNMENT_STATE"
+        and str(((item.get("fact") or {}).get("status")) or "current") == "current"
+    ]
+    assignment_slot_lookup = bool(assignment_items and _query_asks_for_assignment_details(query) and not _query_asks_for_manager(query))
+    direct_fact_lookup = bool(
+        _looks_like_direct_lookup_request(query, query_type)
+        and not query_profile.get("requires_broad_coverage")
+        and not query_profile.get("expects_multiple_items")
+    )
+    chain_fact_lookup = bool(query_profile.get("requires_multi_hop"))
 
-    if query_type not in FACT_PRIORITY_QUERY_TYPES and query_type != "person_lookup":
+    if (
+        query_type not in FACT_PRIORITY_QUERY_TYPES
+        and query_type != "person_lookup"
+        and not direct_fact_lookup
+        and not chain_fact_lookup
+        and not assignment_slot_lookup
+        and not _is_object_role_lookup(query)
+    ):
         return None
+    object_role_answer = _build_object_role_lookup_answer(
+        query,
+        evidence,
+        mode=mode,
+        reason_code=reason_code,
+        retrieval_trace=trace,
+    )
+    if object_role_answer is not None:
+        return object_role_answer
     if not fact_items:
         return None
 
@@ -799,6 +1384,25 @@ def _build_fact_backed_answer(
             "thinking": [],
         }
 
+    if query_type == "person_lookup" and _is_reports_to_lookup(query):
+        summary = ""
+        if reports_to_items:
+            summary = _fact_visible_summary(reports_to_items[0])
+        if not summary:
+            summary = "I couldn't find current manager or reporting evidence for that lookup."
+        answer_payload = _build_answer_payload(
+            mode=mode,
+            reason_code=reason_code,
+            summary=summary,
+            bullets=[],
+            retrieval_trace=trace,
+        )
+        return {
+            "answer": answer_payload["summary"],
+            "answer_payload": answer_payload,
+            "thinking": [],
+        }
+
     if query_type == "task_commitment_lookup" and ambiguity.get("ambiguous"):
         summaries = [_fact_visible_summary(item) for item in fact_items[:3]]
         summaries = [summary for summary in summaries if summary]
@@ -819,11 +1423,30 @@ def _build_fact_backed_answer(
 
     top_fact = fact_items[0]
     visible_summary = _fact_visible_summary(top_fact)
-    temporal_start = str(((top_fact.get("fact") or {}).get("temporal_start")) or "").strip()
+    temporal_start = _evidence_temporal_value(top_fact, slot="temporal_start")
+
+    if assignment_slot_lookup:
+        assignment_answer = _assignment_requested_slots_answer(
+            query,
+            assignment_items[0],
+            mode=mode,
+            reason_code=reason_code,
+            retrieval_trace=trace,
+        )
+        if assignment_answer is not None:
+            return assignment_answer
 
     if query_type == "task_commitment_lookup" and _query_asks_for_time(query):
+        if temporal_start and not _summary_mentions_temporal(visible_summary, temporal_start):
+            time_summary = _assignment_time_visible_summary(top_fact, temporal_start)
+            if time_summary:
+                summary = time_summary
+            else:
+                summary = f"The current recorded time for that commitment is {temporal_start}."
+        else:
+            summary = visible_summary
         summary = (
-            visible_summary
+            summary
             or (f"The current recorded time for that commitment is {temporal_start}." if temporal_start else "")
             or "I found a current matching commitment, but it does not include a scheduled time."
         )
@@ -860,6 +1483,16 @@ def _build_fact_backed_answer(
             "thinking": [],
         }
 
+    chain_answer = _build_reports_to_chain_answer(
+        query,
+        fact_items,
+        mode=mode,
+        reason_code=reason_code,
+        retrieval_trace=trace,
+    )
+    if chain_answer is not None:
+        return chain_answer
+
     if (
         query_type == "person_lookup"
         and not query_profile.get("wants_list_format")
@@ -870,6 +1503,20 @@ def _build_fact_backed_answer(
             mode=mode,
             reason_code=reason_code,
             summary=summary,
+            bullets=[],
+            retrieval_trace=trace,
+        )
+        return {
+            "answer": answer_payload["summary"],
+            "answer_payload": answer_payload,
+            "thinking": [],
+        }
+
+    if direct_fact_lookup and visible_summary:
+        answer_payload = _build_answer_payload(
+            mode=mode,
+            reason_code=reason_code,
+            summary=visible_summary,
             bullets=[],
             retrieval_trace=trace,
         )
@@ -1063,6 +1710,14 @@ def _extract_query_focus_terms(query: str) -> List[str]:
             focus_terms.append(term)
             seen.add(term)
 
+    for match in QUERY_ACRONYM_PATTERN.finditer(query or ""):
+        term = match.group(0).strip().lower()
+        if len(term) < 2 or term in QUERY_FOCUS_STOPWORDS:
+            continue
+        if term not in seen:
+            focus_terms.append(term)
+            seen.add(term)
+
     for match in QUERY_NAME_PATTERN.finditer(query or ""):
         raw = match.group(0).strip()
         if not raw:
@@ -1085,6 +1740,53 @@ def _extract_query_focus_terms(query: str) -> List[str]:
             seen.add(term)
 
     return focus_terms
+
+
+def _collect_evidence_search_text(item: Dict[str, Any]) -> str:
+    document = item.get("document") or {}
+    related_node = item.get("related_node") or {}
+    fact = item.get("fact") or {}
+    fields: List[Any] = [
+        item.get("fact_summary"),
+        item.get("chunk_summary"),
+        document.get("content"),
+        document.get("subject"),
+        document.get("sender"),
+        related_node.get("display_name"),
+        related_node.get("id"),
+        fact.get("canonical_key"),
+        fact.get("claim_type"),
+        fact.get("value_text"),
+        fact.get("subject_key"),
+        fact.get("subject_entity_id"),
+        fact.get("subject_display"),
+        fact.get("object_key"),
+        fact.get("object_entity_id"),
+        fact.get("object_display"),
+        fact.get("display_summary"),
+    ]
+    return " ".join(str(value) for value in fields if value).lower()
+
+
+def _evidence_focus_match_score(item: Dict[str, Any], focus_terms: List[str]) -> int:
+    if not focus_terms:
+        return 0
+    haystack = _collect_evidence_search_text(item)
+    return sum(1 for term in focus_terms if term.lower() in haystack)
+
+
+def _requires_direct_focus_match(
+    query: str,
+    *,
+    query_type: Optional[str],
+    query_profile: Optional[Dict[str, Any]] = None,
+) -> bool:
+    profile = dict(query_profile or query_shape.analyze_query(query))
+    if profile.get("wants_list_format") or profile.get("requires_broad_coverage"):
+        return False
+    if query_type not in {"general_search", "personal_context"}:
+        return False
+    return _looks_like_direct_lookup_request(query, query_type)
 
 
 def _is_displayable_trace_entity(value: Any) -> bool:
@@ -1136,7 +1838,12 @@ def _join_context_parts(*parts: Optional[str]) -> str:
 
 def _is_reports_to_lookup(query: str) -> bool:
     normalized = (query or "").lower()
-    return "report to" in normalized or "reports to" in normalized
+    if _is_object_role_lookup(query):
+        return False
+    return bool(
+        re.search(r"\breports?\s+to\b", normalized)
+        or re.search(r"\b(?:my|your|their|his|her|[A-Z][A-Za-z0-9_\-]+(?:'s|’s))\s+(?:manager|boss|supervisor|lead)\b", query or "", re.IGNORECASE)
+    )
 
 
 def _collect_row_search_text(row: Dict[str, Any]) -> str:
@@ -1253,7 +1960,7 @@ def _prepare_chunk_result(
     rank_score = float(row.get("similarity", 0) or 0)
     if focus_score:
         rank_score += 0.35 * focus_score
-    if reports_to_lookup and "reports to" in str(row.get("chunk_summary") or "").lower():
+    if reports_to_lookup and _is_reports_to_lookup(str(row.get("chunk_summary") or "")):
         rank_score += 0.3
     rank_score += recency_boost
     ranked["focus_match_score"] = focus_score
@@ -1327,9 +2034,18 @@ def _combine_ranked_results(
     query_type: str,
     focus_terms: Optional[List[str]] = None,
     reports_to_lookup: bool = False,
+    require_focus_match: bool = False,
     limit: int = 5,
 ) -> List[Dict[str, Any]]:
     if query_type in FACT_PRIORITY_QUERY_TYPES and fact_results:
+        if focus_terms:
+            focused_facts = [item for item in fact_results if int(item.get("focus_match_score") or 0) > 0]
+            focused_vectors = [item for item in vector_results if int(item.get("focus_match_score") or 0) > 0]
+            if focused_facts:
+                fact_results = focused_facts
+                vector_results = focused_vectors or vector_results
+            elif focused_vectors:
+                return focused_vectors[:limit]
         combined = fact_results[:limit]
         remaining = max(limit - len(combined), 0)
         if remaining:
@@ -1340,13 +2056,21 @@ def _combine_ranked_results(
         and reports_to_lookup
         and any(str((item.get("f") or item.get("fact") or {}).get("claim_type") or "") == "REPORTS_TO" for item in fact_results)
     ):
-        combined = fact_results[:limit]
+        combined = [
+            item
+            for item in fact_results
+            if str((item.get("f") or item.get("fact") or {}).get("claim_type") or "") == "REPORTS_TO"
+        ][:limit]
         remaining = max(limit - len(combined), 0)
         if remaining:
             combined.extend(vector_results[:remaining])
         return combined[:limit]
 
     combined = vector_results + fact_results
+    if require_focus_match and focus_terms:
+        combined = [item for item in combined if int(item.get("focus_match_score") or 0) > 0]
+        combined.sort(key=_result_rank_value, reverse=True)
+        return combined[:limit]
     if query_type == "person_lookup" and focus_terms:
         focused = [item for item in combined if int(item.get("focus_match_score") or 0) > 0]
         if focused:
@@ -1576,6 +2300,11 @@ def query_graph_with_trace(
             query_type=query_type,
             focus_terms=focus_terms,
             reports_to_lookup=reports_to_lookup,
+            require_focus_match=_requires_direct_focus_match(
+                user_input,
+                query_type=query_type,
+                query_profile=query_profile,
+            ),
             limit=5,
         )
         evidence: List[Dict[str, Any]] = []
@@ -1812,6 +2541,15 @@ def generate_groq_response(
     retrieval_trace: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     mode, reason_code = _select_answer_mode(query, retrieval_trace=retrieval_trace)
+    guarded_answer = _build_guarded_abstention_answer(
+        query,
+        documents,
+        mode=mode,
+        reason_code=reason_code,
+        retrieval_trace=retrieval_trace,
+    )
+    if guarded_answer is not None:
+        return guarded_answer
     fact_backed_answer = _build_fact_backed_answer(
         query,
         mode=mode,
@@ -1896,6 +2634,14 @@ def generate_groq_response(
             retrieval_guidance += (
                 " If a request or instruction comes from a group conversation without a resolved target person, "
                 "say that the target is ambiguous instead of assigning it to one person."
+            )
+        critic_feedback = dict((retrieval_trace or {}).get("critic_feedback") or {})
+        critic_issues = [str(issue) for issue in critic_feedback.get("issues") or [] if str(issue).strip()]
+        if critic_issues:
+            retrieval_guidance += (
+                " The previous answer failed critic review for these issue(s): "
+                + ", ".join(critic_issues)
+                + ". Revise the answer so it directly satisfies the original question's requested answer slots using only the evidence."
             )
         llm = _create_groq_client(temperature=0.3, require_json=True)
         chain = CHAT_PROMPT | llm | StrOutputParser()

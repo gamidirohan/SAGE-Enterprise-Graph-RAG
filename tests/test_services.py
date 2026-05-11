@@ -182,6 +182,36 @@ def test_query_graph_with_trace_uses_shallow_seed_depth_for_direct_lookup(monkey
     assert driver.closed is True
 
 
+def test_extract_query_focus_terms_keeps_short_acronyms():
+    assert "hq" in services._extract_query_focus_terms("What is the office address for HQ?")
+
+
+def test_generate_groq_response_abstains_on_unfocused_direct_lookup_evidence(monkeypatch):
+    monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
+
+    trace = {
+        "query_type": "general_search",
+        "query_profile": {"wants_list_format": False, "requires_broad_coverage": False},
+        "evidence": [
+            {
+                "fact_id": "fact-busy",
+                "fact_summary": "Test Alice is busy.",
+                "fact": {"claim_type": "STATUS", "display_summary": "Test Alice is busy."},
+                "document": {"doc_id": "chat-msg-busy", "content": "Test Alice is busy."},
+            }
+        ],
+    }
+
+    result = services.generate_groq_response(
+        "What is the office address for HQ?",
+        ["Fact Summary: Test Alice is busy, Fact ID: fact-busy"],
+        retrieval_trace=trace,
+    )
+
+    assert result["answer"] == "I couldn't find relevant evidence for that lookup."
+    assert result["answer_payload"]["evidence_refs"] == ["fact:fact-busy"]
+
+
 def test_query_graph_with_trace_does_not_scope_broad_summary_to_authenticated_user(monkeypatch):
     session = _Session([])
     driver = _Driver(session)
@@ -384,6 +414,55 @@ def test_query_graph_with_trace_prioritizes_exact_task_fact_over_higher_similari
     assert result["trace"]["evidence"][0]["fact_priority"] is True
 
 
+def test_query_graph_with_trace_rejects_unfocused_task_facts_when_query_has_exact_entities(monkeypatch):
+    def handler(query, _params):
+        if "MATCH (c:Chunk)-[:PART_OF]->(d:Document)" in query:
+            return [
+                {
+                    "chunk_id": "chunk-proton",
+                    "chunk_summary": "Charlie will work on Project Proton starting tomorrow.",
+                    "d": {"doc_id": "chat-msg-proton", "subject": "Chat message", "sender": "u1"},
+                    "similarity": 0.82,
+                    "relationship": "PART_OF",
+                    "n": {"id": "charlie-id", "name": "Charlie", "_labels": ["Person"]},
+                }
+            ]
+        if "MATCH (f:CanonicalFact)" in query:
+            return [
+                {
+                    "fact_id": "fact-alpha",
+                    "fact_summary": "Alice Johnson will send Project Alpha budget on 2026-05-12T20:00:00+00:00",
+                    "f": {
+                        "fact_id": "fact-alpha",
+                        "canonical_key": "assignment::direct:1:3::send-project-alpha-budget",
+                        "claim_type": "TASK_ASSIGNMENT",
+                        "status": "current",
+                        "subject_key": "1",
+                        "subject_entity_id": "1",
+                        "object_key": "3",
+                        "object_entity_id": "3",
+                        "temporal_start": "2026-05-12T20:00:00+00:00",
+                    },
+                    "d": {"doc_id": "chat-msg-alpha", "subject": "Chat message", "sender": "1", "source": "chat_message"},
+                    "similarity": 1.0,
+                }
+            ]
+        return []
+
+    session = _DispatchSession(handler)
+    driver = _Driver(session)
+
+    monkeypatch.setattr(services.utils, "create_neo4j_driver", lambda: driver)
+    monkeypatch.setattr(services.utils, "get_cached_embedding_model", lambda: _Model())
+
+    result = services.query_graph_with_trace("From when will Charlie start working on Project Proton?")
+
+    assert result["trace"]["query_type"] == "task_commitment_lookup"
+    assert result["trace"]["result_count"] == 1
+    assert result["trace"]["evidence"][0]["chunk_id"] == "chunk-proton"
+    assert all(item.get("fact_id") != "fact-alpha" for item in result["trace"]["evidence"])
+
+
 def test_query_graph_with_trace_prioritizes_meeting_fact_for_schedule_lookup(monkeypatch):
     def handler(query, _params):
         if "MATCH (c:Chunk)-[:PART_OF]->(d:Document)" in query:
@@ -545,6 +624,61 @@ def test_query_graph_with_trace_prioritizes_reports_to_fact_over_older_chunk(mon
     assert result["trace"]["query_type"] == "person_lookup"
     assert result["trace"]["evidence"][0]["fact_id"] == "fact-rohan-current"
     assert driver.closed is True
+
+
+def test_query_graph_with_trace_prioritizes_reports_to_fact_for_manager_wording(monkeypatch):
+    def handler(query, _params):
+        if "MATCH (c:Chunk)-[:PART_OF]->(d:Document)" in query:
+            return []
+        if "MATCH (f:CanonicalFact)" in query:
+            return [
+                {
+                    "fact_id": "fact-assignment",
+                    "fact_summary": "Charlie is assigned to Project Proton.",
+                    "f": {
+                        "fact_id": "fact-assignment",
+                        "canonical_key": "assignment_state::charlie::project-proton",
+                        "claim_type": "ASSIGNMENT_STATE",
+                        "status": "current",
+                        "subject_key": "charlie",
+                        "subject_entity_id": "charlie",
+                        "object_key": "project-proton",
+                        "object_entity_id": "project-proton",
+                    },
+                    "d": {"doc_id": "chat-msg-assignment", "subject": "Chat message", "sender": "u1", "source": "chat_message"},
+                    "similarity": 0.95,
+                },
+                {
+                    "fact_id": "fact-manager",
+                    "fact_summary": "Charlie reports to Alice Manager.",
+                    "f": {
+                        "fact_id": "fact-manager",
+                        "canonical_key": "reports_to::charlie",
+                        "claim_type": "REPORTS_TO",
+                        "status": "current",
+                        "subject_key": "charlie",
+                        "subject_entity_id": "charlie",
+                        "object_key": "alice-manager",
+                        "object_entity_id": "alice-manager",
+                        "display_summary": "Charlie reports to Alice Manager.",
+                    },
+                    "d": {"doc_id": "chat-msg-manager", "subject": "Chat message", "sender": "u1", "source": "chat_message"},
+                    "similarity": 0.3,
+                },
+            ]
+        return []
+
+    session = _DispatchSession(handler)
+    driver = _Driver(session)
+
+    monkeypatch.setattr(services.utils, "create_neo4j_driver", lambda: driver)
+    monkeypatch.setattr(services.utils, "get_cached_embedding_model", lambda: _Model())
+
+    result = services.query_graph_with_trace("Who is Charlie's Manager now?")
+
+    assert result["trace"]["query_type"] == "person_lookup"
+    assert result["trace"]["evidence"][0]["fact_id"] == "fact-manager"
+    assert result["trace"]["evidence"][0]["fact"]["claim_type"] == "REPORTS_TO"
 
 
 def test_query_graph_with_trace_filters_group_request_lookup_to_object_terms(monkeypatch):
@@ -745,6 +879,7 @@ def test_generate_groq_response_builds_fact_first_context(monkeypatch):
 
     trace = {
         "query_type": "task_commitment_lookup",
+        "query_profile": {"requires_broad_coverage": True, "expects_multiple_items": False, "wants_list_format": False},
         "evidence": [
             {
                 "fact_id": "fact-1",
@@ -783,13 +918,13 @@ def test_generate_groq_response_builds_fact_first_context(monkeypatch):
     )
 
     assert result["answer"] == "You promised to send the report by 2026-04-03 01:30 AM IST."
-    assert result["answer_payload"]["mode"] == "short"
-    assert result["answer_payload"]["reason_code"] == "direct_lookup"
+    assert result["answer_payload"]["mode"] == "long"
+    assert result["answer_payload"]["reason_code"] == "evidence_complexity"
     assert result["answer_payload"]["evidence_refs"] == ["fact:fact-1", "chunk:chunk-1"]
     assert result["answer_payload"]["bullets"] == ["Recipient: u2", "Time: 2026-04-03 01:30 AM IST"]
     assert captured["user_context"].endswith("Query classification: task_commitment_lookup.")
     assert captured["retrieval_guidance"].startswith("This is a task or commitment lookup.")
-    assert captured["answer_mode"] == "short"
+    assert captured["answer_mode"] == "long"
     assert captured["context"].split("\n\n")[0].startswith("Canonical facts")
 
 
@@ -828,6 +963,115 @@ def test_generate_groq_response_uses_fact_summary_for_reports_to_lookup(monkeypa
     assert result["answer"] == "Rohan reports to Anil Fresh."
     assert result["answer_payload"]["mode"] == "short"
     assert result["answer_payload"]["reason_code"] == "direct_lookup"
+
+
+def test_generate_groq_response_uses_reports_to_fact_for_manager_lookup(monkeypatch):
+    monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
+
+    trace = {
+        "query_type": "person_lookup",
+        "query_profile": {"wants_list_format": False},
+        "evidence": [
+            {
+                "fact_id": "fact-assignment",
+                "fact_summary": "Charlie is assigned to Project Proton.",
+                "fact": {
+                    "claim_type": "ASSIGNMENT_STATE",
+                    "status": "current",
+                    "display_summary": "Charlie is assigned to Project Proton.",
+                },
+                "document": {"doc_id": "chat-msg-assignment"},
+            },
+            {
+                "fact_id": "fact-manager",
+                "fact_summary": "Charlie reports to Alice Manager.",
+                "fact": {
+                    "claim_type": "REPORTS_TO",
+                    "status": "current",
+                    "canonical_key": "reports_to::charlie",
+                    "display_summary": "Charlie reports to Alice Manager.",
+                },
+                "document": {"doc_id": "chat-msg-manager"},
+            },
+        ],
+    }
+
+    result = services.generate_groq_response(
+        "Who is Charlie's Manager now?",
+        [],
+        retrieval_trace=trace,
+    )
+
+    assert result["answer"] == "Charlie reports to Alice Manager."
+    assert "assigned" not in result["answer"].lower()
+
+
+def test_generate_groq_response_refuses_assignment_fact_for_manager_lookup(monkeypatch):
+    monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
+
+    trace = {
+        "query_type": "person_lookup",
+        "query_profile": {"wants_list_format": False},
+        "evidence": [
+            {
+                "fact_id": "fact-assignment",
+                "fact_summary": "Charlie is assigned to Project Proton.",
+                "fact": {
+                    "claim_type": "ASSIGNMENT_STATE",
+                    "status": "current",
+                    "display_summary": "Charlie is assigned to Project Proton.",
+                },
+                "document": {"doc_id": "chat-msg-assignment"},
+            },
+        ],
+    }
+
+    result = services.generate_groq_response(
+        "Who is Charlie's Manager now?",
+        [],
+        retrieval_trace=trace,
+    )
+
+    assert result["answer"] == "I couldn't find current manager or reporting evidence for that lookup."
+    assert "assigned" not in result["answer"].lower()
+
+
+def test_generate_groq_response_answers_historical_manager_of_project_from_role_evidence(monkeypatch):
+    monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
+
+    trace = {
+        "query_type": "person_lookup",
+        "query_profile": {"wants_list_format": False},
+        "evidence": [
+            {
+                "chunk_id": "chunk-role",
+                "chunk_summary": "Bob Smith was the manager of Project Alpha in 2022.",
+                "document": {
+                    "doc_id": "chat-msg-role",
+                    "content": "Bob Smith was the manager of Project Alpha in 2022.",
+                },
+            },
+            {
+                "fact_id": "fact-budget",
+                "fact_summary": "Alice Johnson will send Project Alpha budget on 2026-05-12T20:00:00+00:00",
+                "fact": {
+                    "claim_type": "TASK_ASSIGNMENT",
+                    "status": "current",
+                    "display_summary": "Alice Johnson will send Project Alpha budget on 2026-05-12T20:00:00+00:00",
+                },
+                "document": {"doc_id": "chat-msg-budget"},
+            },
+        ],
+    }
+
+    result = services.generate_groq_response(
+        "Who was the manager of Project Alpha in 2022?",
+        [],
+        retrieval_trace=trace,
+    )
+
+    assert result["answer"] == "Bob Smith was the manager of Project Alpha in 2022."
+    assert "current manager or reporting evidence" not in result["answer"]
 
 
 def test_generate_groq_response_surfaces_person_lookup_fact_conflict_without_llm(monkeypatch):
@@ -947,6 +1191,128 @@ def test_generate_groq_response_uses_fact_summary_for_task_when_lookup(monkeypat
     assert result["answer"] == "Test User will send Project Alpha budget to Alice Johnson on 2026-05-10 09:00 PM IST."
     assert result["answer_payload"]["mode"] == "short"
     assert result["answer_payload"]["reason_code"] == "direct_lookup"
+
+
+def test_generate_groq_response_uses_assignment_start_for_from_when_lookup(monkeypatch):
+    monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
+
+    trace = {
+        "query_type": "task_commitment_lookup",
+        "evidence": [
+            {
+                "fact_id": "fact-proton",
+                "fact_summary": "Charlie is assigned to Project Proton.",
+                "fact": {
+                    "claim_type": "ASSIGNMENT_STATE",
+                    "status": "current",
+                    "canonical_key": "assignment_state::charlie-id::project-proton",
+                    "display_summary": "Charlie is assigned to Project Proton.",
+                    "subject_display": "Charlie",
+                    "object_display": "Project Proton",
+                    "temporal_start": "2026-05-12",
+                    "temporal_end": "2026-07-12",
+                },
+                "document": {"doc_id": "chat-msg-proton"},
+            }
+        ],
+    }
+
+    result = services.generate_groq_response(
+        "From when will Charlie start working on Project Proton?",
+        [],
+        retrieval_trace=trace,
+    )
+
+    assert result["answer"] == "Charlie starts working on Project Proton on 2026-05-12."
+    assert result["answer_payload"]["mode"] == "short"
+    assert result["answer_payload"]["reason_code"] == "direct_lookup"
+
+
+def test_generate_groq_response_uses_source_text_start_when_fact_temporal_is_missing(monkeypatch):
+    monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
+
+    trace = {
+        "query_type": "task_commitment_lookup",
+        "evidence": [
+            {
+                "fact_id": "fact-proton",
+                "fact_summary": "Charlie is assigned to Project Proton.",
+                "fact": {
+                    "claim_type": "ASSIGNMENT_STATE",
+                    "status": "current",
+                    "canonical_key": "assignment_state::charlie::project-proton",
+                    "display_summary": "Charlie is assigned to Project Proton.",
+                    "subject_display": "Charlie",
+                    "object_display": "Project Proton",
+                },
+                "document": {
+                    "doc_id": "chat-msg-proton",
+                    "content": "Hi Charlie, I'll be you manager for project proton, and you'll work on it for 2 months starting tomorrow",
+                },
+            }
+        ],
+    }
+
+    result = services.generate_groq_response(
+        "From when will Charlie start working on Project Proton?",
+        [],
+        retrieval_trace=trace,
+    )
+
+    assert result["answer"] == "Charlie starts working on Project Proton starting tomorrow."
+    assert result["answer_payload"]["mode"] == "short"
+    assert result["answer_payload"]["reason_code"] == "direct_lookup"
+
+
+def test_generate_groq_response_answers_assignment_duration_project_without_manager(monkeypatch):
+    monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
+
+    trace = {
+        "query_type": "task_commitment_lookup",
+        "query_profile": {"expects_multiple_items": False, "requires_broad_coverage": False, "wants_list_format": False},
+        "evidence": [
+            {
+                "fact_id": "fact-manager",
+                "fact_summary": "Charlie reports to Elijah Parker.",
+                "fact": {
+                    "claim_type": "REPORTS_TO",
+                    "status": "current",
+                    "display_summary": "Charlie reports to Elijah Parker.",
+                    "subject_display": "Charlie",
+                    "object_display": "Elijah Parker",
+                },
+                "document": {"doc_id": "chat-msg-other"},
+            },
+            {
+                "fact_id": "fact-proton",
+                "fact_summary": "Charlie is assigned to Project Proton.",
+                "fact": {
+                    "claim_type": "ASSIGNMENT_STATE",
+                    "status": "current",
+                    "canonical_key": "assignment_state::charlie::project-proton",
+                    "display_summary": "Charlie is assigned to Project Proton.",
+                    "subject_display": "Charlie",
+                    "object_display": "Project Proton",
+                    "temporal_start": "2026-05-12",
+                    "temporal_end": "2026-07-12",
+                },
+                "document": {
+                    "doc_id": "chat-msg-proton",
+                    "content": "Hi Charlie, I'll be you manager for project proton, and you'll work on it for 2 months starting tomorrow",
+                },
+            },
+        ],
+    }
+
+    result = services.generate_groq_response(
+        "How long is Charlie going to work, and in which project",
+        [],
+        retrieval_trace=trace,
+    )
+
+    assert result["answer"] == "Charlie will work on Project Proton for 2 months."
+    assert result["answer_payload"]["bullets"] == []
+    assert "manager" not in result["answer"].lower()
 
 
 def test_generate_groq_response_surfaces_task_lookup_ambiguity_without_llm(monkeypatch):

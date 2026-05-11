@@ -32,7 +32,6 @@ _EXHAUSTIVE_PHRASES = (
 _LIST_FORMAT_PHRASES = (
     "list",
     "show",
-    "which",
     "who all",
     "what are the",
     "who are the",
@@ -44,6 +43,14 @@ _BROAD_SYNTHESIS_PHRASES = (
     "explain all",
     "walk me through",
     "everything we know",
+)
+_RELATIONSHIP_CHAIN_PHRASES = (
+    "manager of manager",
+    "manager's manager",
+    "manager of ",
+    "skip-level",
+    "skip level",
+    "chain",
 )
 _FIRST_PERSON_SINGULAR = re.compile(r"\b(i|me|my|mine|myself)\b", re.IGNORECASE)
 _FIRST_PERSON_PLURAL = re.compile(r"\b(we|us|our|ours|ourselves)\b", re.IGNORECASE)
@@ -61,10 +68,11 @@ def analyze_query(text: str) -> Dict[str, Any]:
     normalized = _normalize_query(text)
     contains_multi_phrase = any(phrase in normalized for phrase in _MULTI_ITEM_PHRASES)
     contains_broad_synthesis = any(phrase in normalized for phrase in _BROAD_SYNTHESIS_PHRASES)
+    contains_relationship_chain = any(phrase in normalized for phrase in _RELATIONSHIP_CHAIN_PHRASES) and normalized.count("manager") >= 2
     contains_plural_interrogative = bool(_PLURAL_INTERROGATIVE_PATTERN.search(normalized))
     contains_list_prompt = any(phrase in normalized for phrase in _LIST_FORMAT_PHRASES)
 
-    expects_multiple_items = contains_multi_phrase or contains_plural_interrogative or contains_broad_synthesis
+    expects_multiple_items = contains_multi_phrase or contains_plural_interrogative or contains_broad_synthesis or contains_relationship_chain
     requires_broad_coverage = expects_multiple_items or contains_broad_synthesis or any(
         re.search(rf"\b{re.escape(token)}\b", normalized)
         for token in _EXHAUSTIVE_PHRASES
@@ -80,6 +88,7 @@ def analyze_query(text: str) -> Dict[str, Any]:
     return {
         "expects_multiple_items": expects_multiple_items,
         "requires_broad_coverage": requires_broad_coverage,
+        "requires_multi_hop": contains_relationship_chain,
         "wants_list_format": wants_list_format,
         "first_person_scope": first_person_scope,
         "minimum_unique_evidence": 2 if expects_multiple_items else 1,
@@ -99,6 +108,7 @@ def recommend_graph_depth(
 
     if (
         effective_query_type == "compound_lookup"
+        or profile.get("requires_multi_hop")
         or profile.get("requires_broad_coverage")
         or any(
             phrase in normalized

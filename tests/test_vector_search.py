@@ -39,5 +39,5 @@ def test_fulltext_retrieve_passes_query_parameter_without_driver_keyword_collisi
     assert result["trace"]["result_count"] == 0
     assert "error" not in result["trace"]
     fulltext_calls = [call for call in session.calls if "db.index.fulltext.queryNodes" in call[0]]
-    assert len(fulltext_calls) == 2
+    assert len(fulltext_calls) == 3
     assert all(call[1]["query"] == "What did I promise to send?" for call in fulltext_calls)

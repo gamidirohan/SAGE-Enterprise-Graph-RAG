@@ -18,6 +18,15 @@ def test_analyze_query_keeps_single_lookup_as_single_item():
     assert profile["minimum_unique_evidence"] == 1
 
 
+def test_analyze_query_keeps_which_project_lookup_as_single_item():
+    profile = query_shape.analyze_query("How long is Charlie going to work, and in which project")
+
+    assert profile["expects_multiple_items"] is False
+    assert profile["requires_broad_coverage"] is False
+    assert profile["wants_list_format"] is False
+    assert profile["minimum_unique_evidence"] == 1
+
+
 def test_analyze_query_marks_comparison_as_broad_multi_item():
     profile = query_shape.analyze_query(
         "Compare Project Beta and Project Gamma based on the chat history."

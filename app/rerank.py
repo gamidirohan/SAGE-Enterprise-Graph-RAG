@@ -11,8 +11,10 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 try:
     import app.query_shape as query_shape
+    import app.services as services
 except ImportError:  # pragma: no cover - direct execution fallback
     import query_shape
+    import services
 
 
 DEFAULT_RERANK_MODEL = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
@@ -332,6 +334,43 @@ def _detect_task_lookup_ambiguity(items: List[Dict[str, Any]], *, query_type: st
     return {"ambiguous": False}
 
 
+def _focus_match_score(item: Dict[str, Any], focus_terms: List[str]) -> int:
+    if not focus_terms:
+        return 0
+    haystack = _normalize_text_fingerprint(_candidate_text(item))
+    return sum(1 for term in focus_terms if _normalize_text_fingerprint(term) in haystack)
+
+
+def _filter_unfocused_lookup_evidence(
+    items: List[Dict[str, Any]],
+    *,
+    query: str,
+    query_type: str,
+    query_profile: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    require_focus_match = services._requires_direct_focus_match(
+        query,
+        query_type=query_type,
+        query_profile=query_profile,
+    )
+    if query_type not in {"task_commitment_lookup", "schedule_or_timeline"}:
+        if not require_focus_match:
+            return items
+    if query_profile.get("wants_list_format") or query_profile.get("expects_multiple_items"):
+        return items
+
+    focus_terms = services._extract_query_focus_terms(query)
+    if not focus_terms:
+        return items
+
+    focused = [item for item in items if _focus_match_score(item, focus_terms) > 0]
+    if require_focus_match:
+        return focused
+    if not focused:
+        return items
+    return focused
+
+
 def _apply_lookup_conflicts(
     items: List[Dict[str, Any]],
     *,
@@ -418,7 +457,7 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
     if query_type in {"task_commitment_lookup", "schedule_or_timeline"} and not query_profile.get("wants_list_format"):
         if any(item.get("fact_id") for item in evidence):
             top_k = 1
-    if query_type == "person_lookup" and not query_profile.get("wants_list_format"):
+    if query_type == "person_lookup" and not query_profile.get("wants_list_format") and not query_profile.get("requires_multi_hop"):
         if any(_is_reports_to_fact(item) for item in evidence):
             top_k = 1
 
@@ -438,6 +477,12 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
 
     if not query:
         evidence.sort(key=lambda item: _sort_key(item, query_type=query_type, score_field="rank_score"), reverse=True)
+        evidence = _filter_unfocused_lookup_evidence(
+            evidence,
+            query=query,
+            query_type=query_type,
+            query_profile=query_profile,
+        )
         top_k, task_ambiguity, fact_conflict = _apply_lookup_conflicts(
             evidence,
             top_k=top_k,
@@ -467,6 +512,12 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
         scored, metadata = _score_evidence(query, evidence, query_type=query_type)
     except Exception:
         evidence.sort(key=lambda item: _sort_key(item, query_type=query_type, score_field="rank_score"), reverse=True)
+        evidence = _filter_unfocused_lookup_evidence(
+            evidence,
+            query=query,
+            query_type=query_type,
+            query_profile=query_profile,
+        )
         top_k, task_ambiguity, fact_conflict = _apply_lookup_conflicts(
             evidence,
             top_k=top_k,
@@ -497,6 +548,12 @@ def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]
         }
         return {"documents": _unique_documents(selected), "trace": reranked_trace}
 
+    scored = _filter_unfocused_lookup_evidence(
+        scored,
+        query=query,
+        query_type=query_type,
+        query_profile=query_profile,
+    )
     top_k, task_ambiguity, fact_conflict = _apply_lookup_conflicts(
         scored,
         top_k=top_k,
