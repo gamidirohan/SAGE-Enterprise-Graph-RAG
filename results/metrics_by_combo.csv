@@ -1,0 +1,5 @@
+llm_model,embedding_model,n_queries,sage_avg_score,trad_avg_score,sage_avg_latency_s,trad_avg_latency_s,sage_wins,trad_wins,ties,multi_hop_cases,multi_hop_success_rate,avg_saia_iterations
+llama-3.3-70b-versatile,all-mpnet-base-v2,10,9,7,2.2441579580307005,1.6098389625549316,10,0,0,0,,
+llama-3.3-70b-versatile,multi-qa-mpnet-base-dot-v1,10,9,7,6.057829904556274,3.94191427230835,10,0,0,0,,
+llama-3.1-8b-instant,all-mpnet-base-v2,10,9,7,3.562161993980408,3.395820689201355,10,0,0,0,,
+llama-3.1-8b-instant,multi-qa-mpnet-base-dot-v1,10,9,7,3.7705148458480835,4.375620746612549,10,0,0,0,,

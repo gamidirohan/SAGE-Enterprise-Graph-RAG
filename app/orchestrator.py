@@ -41,7 +41,7 @@ class OrchestratorState:
 
     query: str
     user_id: Optional[str]
-    history: List[Dict[str, str]]
+    history: List[Dict[str, Any]]
     event_sink: Optional[agentic.AgentEventSink]
     state: Dict[str, Any]
     reasoning: Dict[str, Any] = field(default_factory=lambda: {"valid": True, "validated_evidence_count": 0, "missing_fields": []})
@@ -144,7 +144,7 @@ def _initialize_runtime(
     query: str,
     *,
     user_id: Optional[str],
-    history: Optional[List[Dict[str, str]]],
+    history: Optional[List[Dict[str, Any]]],
     event_sink: Optional[agentic.AgentEventSink],
 ) -> OrchestratorState:
     state = agentic._initial_state(query, user_id=user_id, history=history, plan={})
@@ -337,6 +337,7 @@ def _run_generator(runtime: OrchestratorState, *, revision: bool = False) -> Age
         runtime.state.get("documents") or [],
         user_id=runtime.user_id,
         retrieval_trace=runtime.state.get("trace"),
+        history=runtime.history,
     )
     agentic._emit_event(
         runtime.state,
@@ -565,7 +566,7 @@ def run_agentic_query(
     query: str,
     *,
     user_id: Optional[str] = None,
-    history: Optional[List[Dict[str, str]]] = None,
+    history: Optional[List[Dict[str, Any]]] = None,
     event_sink: Optional[agentic.AgentEventSink] = None,
 ) -> Dict[str, Any]:
     # Use default colored event sink if none provided

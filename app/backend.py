@@ -60,7 +60,7 @@ store_in_neo4j = services.store_in_neo4j
 
 class ChatRequest(BaseModel):
     message: str
-    history: Optional[List[Dict[str, str]]] = Field(default_factory=list)
+    history: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
     user_id: Optional[str] = None
     agentic_mode: bool = True
 
@@ -830,6 +830,7 @@ async def chat_endpoint(request: ChatRequest):
         graph_result.get("documents") or [],
         user_id=request.user_id,
         retrieval_trace=graph_result.get("trace"),
+        history=request.history,
     )
     trace = {**(graph_result.get("trace") or {}), **((ai_result.get("trace") or {}) if isinstance(ai_result, dict) else {})}
     answer_payload = _fallback_answer_payload(ai_result, trace)

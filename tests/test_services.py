@@ -964,6 +964,76 @@ def test_generate_groq_response_builds_fact_first_context(monkeypatch):
     assert captured["context"].split("\n\n")[0].startswith("Canonical facts")
 
 
+def test_generate_groq_response_uses_people_chat_window_when_available(monkeypatch):
+    captured = {}
+
+    class FakeChain:
+        def __or__(self, _other):
+            return self
+
+        def invoke(self, payload):
+            captured.update(payload)
+            return '{"summary":"Alice Johnson was appointed as Project Manager.","bullets":[]}'
+
+    monkeypatch.setattr(services, "CHAT_PROMPT", FakeChain())
+    monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: object())
+    monkeypatch.setattr(services, "StrOutputParser", lambda: object())
+    monkeypatch.setattr(
+        services,
+        "_build_guarded_abstention_answer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("people-chat-backed SAGE answers should use the main generator directly")),
+    )
+    monkeypatch.setattr(
+        services,
+        "_build_graph_conversation_window",
+        lambda *_args, **_kwargs: [
+            "- 2026-05-12 01:30 AM IST | Bob Smith -> Alice Johnson | Alice Johnson was appointed as Project Manager."
+        ],
+    )
+
+    trace = {
+        "query_type": "person_lookup",
+        "query_profile": {"wants_list_format": False},
+        "evidence": [
+            {
+                "fact_id": "fact-1",
+                "fact_summary": "Alice Johnson reports to Bob Smith.",
+                "fact": {
+                    "claim_type": "REPORTS_TO",
+                    "status": "current",
+                    "canonical_key": "reports_to::alice-id",
+                    "display_summary": "Alice Johnson reports to Bob Smith.",
+                },
+                "document": {"doc_id": "chat-msg-m1"},
+            }
+        ],
+    }
+
+    result = services.generate_groq_response(
+        "What is Alice Johnson appointed as?",
+        [],
+        retrieval_trace=trace,
+        history=[{"content": "placeholder"}],
+    )
+
+    assert result["answer"] == "Alice Johnson was appointed as Project Manager."
+    assert "Recent people chat evidence" in captured["conversation_window"]
+    assert captured["context"].startswith("Canonical facts")
+    assert "additional chat context" in captured["retrieval_guidance"]
+
+
+def test_build_conversation_window_ignores_sage_history_when_people_chat_is_missing(monkeypatch):
+    monkeypatch.setattr(services, "_build_graph_conversation_window", lambda *_args, **_kwargs: [])
+
+    window = services._build_conversation_window(
+        "What is Alice Johnson appointed as?",
+        history=[{"content": "This is a SAGE-only thread message."}],
+        retrieval_trace={"evidence": []},
+    )
+
+    assert window == "No recent people chat window was available."
+
+
 def test_generate_groq_response_uses_fact_summary_for_reports_to_lookup(monkeypatch):
     monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
 

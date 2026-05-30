@@ -419,7 +419,7 @@ def build_plan(query: str, *, user_id: Optional[str] = None) -> Dict[str, Any]:
             ],
             {"type": "rerank", "tool": "score_sort"},
             {"type": "validate_paths", "tool": "graph_path_validator"},
-            {"type": "generate", "tool": "groq_generator"},
+            {"type": "generate", "tool": "chat_generator"},
             {"type": "critic", "tool": "policy_guard"},
         ],
     }
@@ -447,7 +447,7 @@ def _initial_state(
     query: str,
     *,
     user_id: Optional[str],
-    history: Optional[List[Dict[str, str]]],
+    history: Optional[List[Dict[str, Any]]],
     plan: Dict[str, Any],
 ) -> Dict[str, Any]:
     return {
@@ -767,7 +767,7 @@ def _legacy_run_agentic_query(
     query: str,
     *,
     user_id: Optional[str] = None,
-    history: Optional[List[Dict[str, str]]] = None,
+    history: Optional[List[Dict[str, Any]]] = None,
     event_sink: Optional[AgentEventSink] = None,
 ) -> Dict[str, Any]:
     state = _initial_state(query, user_id=user_id, history=history, plan={})
@@ -887,6 +887,7 @@ def _legacy_run_agentic_query(
         state.get("documents") or [],
         user_id=user_id,
         retrieval_trace=state.get("trace"),
+        history=state.get("history"),
     )
     generator_duration_ms = int((time.perf_counter() - started_at) * 1000)
     _emit_event(
@@ -975,6 +976,7 @@ def _legacy_run_agentic_query(
             state.get("documents") or [],
             user_id=user_id,
             retrieval_trace=state.get("trace"),
+            history=state.get("history"),
         )
         _emit_event(
             state,
@@ -1073,7 +1075,7 @@ def run_agentic_query(
     query: str,
     *,
     user_id: Optional[str] = None,
-    history: Optional[List[Dict[str, str]]] = None,
+    history: Optional[List[Dict[str, Any]]] = None,
     event_sink: Optional[AgentEventSink] = None,
 ) -> Dict[str, Any]:
     try:

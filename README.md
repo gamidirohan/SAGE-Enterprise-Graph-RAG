@@ -32,7 +32,7 @@ SAGE is an enterprise-focused Graph RAG project that:
 - Neo4j
 - Streamlit
 - FastAPI
-- LangChain + Groq
+- LangChain + Groq or Azure AI Foundry
 - SentenceTransformers
 - uv (environment and dependency management)
 
@@ -74,9 +74,20 @@ Useful optional backend settings:
 
 ```env
 GROQ_MODEL=llama-3.1-8b-instant
+LLM_PROVIDER=groq
+AZURE_OPENAI_ENDPOINT=https://<your-resource>.openai.azure.com/
+AZURE_OPENAI_DEPLOYMENT_NAME=<your-deployment-name>
+AZURE_OPENAI_API_KEY=<your-key>
 EMBEDDING_MODEL=sentence-transformers/all-mpnet-base-v2
 SAIA_ENABLED=false
 ```
+
+Notes:
+- Leave `LLM_PROVIDER` unset to auto-pick Azure when the Azure Foundry variables are present, otherwise Groq.
+- Set `LLM_PROVIDER=groq` to force the current Groq setup.
+- Set `LLM_PROVIDER=azure` to route generation through an Azure AI Foundry or Azure OpenAI deployment.
+- For Azure/Foundry, the code uses the OpenAI v1 surface and the deployment name directly; no monthly `api-version` is required.
+- If you want a stronger model without changing providers, use `llama-3.3-70b-versatile` on Groq; if you move to Azure Foundry, pick a GPT-4-class or other Foundry deployment you have already enabled.
 
 Important note:
 - App modules load `.env` from the repo root.

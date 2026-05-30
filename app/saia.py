@@ -615,21 +615,14 @@ def _extract_manager_claims(sentence: str, context: GroundingContext, session: A
 
 
 def _saia_llm_assist_enabled() -> bool:
-    return SAIA_LLM_ASSISTED and bool(utils.GROQ_API_KEY)
+    return SAIA_LLM_ASSISTED and utils.chat_llm_configured()
 
 
 def _create_saia_llm_client():
     if not _saia_llm_assist_enabled():
         return None
     try:
-        from langchain_groq import ChatGroq
-
-        return ChatGroq(
-            model_name=utils.GROQ_MODEL,
-            temperature=0.0,
-            groq_api_key=utils.GROQ_API_KEY,
-            model_kwargs={"response_format": {"type": "json_object"}},
-        )
+        return utils.create_chat_llm(temperature=0.0, require_json=True)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Failed to initialize SAIA LLM assistant: %s", exc)
         return None

@@ -11,10 +11,11 @@ import re
 import zipfile
 from functools import lru_cache
 from pathlib import Path
-from typing import List
+from typing import Any, List
 from xml.etree import ElementTree
 
 from dotenv import load_dotenv
+from langchain_core.runnables import RunnableLambda
 
 
 # Keep model download/loading output concise in app logs.
@@ -38,6 +39,21 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_Password")
 NEO4J_DATABASE = os.getenv("NEO4J_DATABASE")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "").strip().lower()
+AZURE_OPENAI_ENDPOINT = (
+    os.getenv("AZURE_OPENAI_ENDPOINT")
+    or os.getenv("AZURE_FOUNDRY_ENDPOINT")
+    or os.getenv("AZURE_OPENAPI_ENDPOINT")
+)
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("AZURE_FOUNDRY_API_KEY")
+AZURE_OPENAI_DEPLOYMENT = (
+    os.getenv("AZURE_OPENAI_DEPLOYMENT")
+    or os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+    or os.getenv("AZURE_DEPLOYMENT_NAME")
+)
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
+if not LLM_PROVIDER:
+    LLM_PROVIDER = "azure" if AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT and (AZURE_OPENAI_API_KEY or os.getenv("AZURE_INFERENCE_CREDENTIAL")) else "groq"
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-mpnet-base-v2")
 MODEL_CACHE_DIR = ROOT_DIR / ".cache" / "models"
 MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -62,6 +78,91 @@ def _load_sentence_transformer_class():
         return importlib.import_module("sentence_transformers").SentenceTransformer
     except Exception as exc:  # pragma: no cover - optional during test collection
         raise RuntimeError("sentence-transformers is unavailable") from exc
+
+
+def _load_chat_groq_class():
+    try:
+        return importlib.import_module("langchain_groq").ChatGroq
+    except Exception as exc:  # pragma: no cover - optional during test collection
+        raise RuntimeError("langchain_groq is unavailable") from exc
+
+
+def _load_openai_client_class():
+    try:
+        return importlib.import_module("openai").OpenAI
+    except Exception as exc:  # pragma: no cover - optional during test collection
+        raise RuntimeError("openai is unavailable") from exc
+
+
+def _openai_base_url(endpoint: str) -> str:
+    normalized = endpoint.rstrip("/")
+    if normalized.endswith("/openai/v1"):
+        return normalized + "/"
+    return normalized + "/openai/v1/"
+
+
+def _prompt_to_messages(prompt_input: Any) -> List[dict[str, Any]]:
+    if isinstance(prompt_input, str):
+        return [{"role": "user", "content": prompt_input}]
+
+    messages = prompt_input.to_messages() if hasattr(prompt_input, "to_messages") else list(prompt_input or [])
+    converted: List[dict[str, Any]] = []
+    role_map = {"system": "system", "human": "user", "ai": "assistant", "tool": "tool"}
+    for message in messages:
+        role = role_map.get(getattr(message, "type", "user"), "user")
+        content = getattr(message, "content", "")
+        converted.append({"role": role, "content": content})
+    return converted
+
+
+def chat_llm_configured() -> bool:
+    if LLM_PROVIDER in {"azure", "azure_openai", "azure-openai", "foundry"}:
+        return bool(
+            AZURE_OPENAI_ENDPOINT
+            and AZURE_OPENAI_DEPLOYMENT
+            and (AZURE_OPENAI_API_KEY or os.getenv("AZURE_INFERENCE_CREDENTIAL"))
+        )
+    return bool(GROQ_API_KEY)
+
+
+def create_chat_llm(*, temperature: float, require_json: bool = False):
+    provider = LLM_PROVIDER
+    if provider in {"azure", "azure_openai", "azure-openai", "foundry"}:
+        if not AZURE_OPENAI_ENDPOINT or not AZURE_OPENAI_DEPLOYMENT:
+            raise RuntimeError(
+                "Azure Foundry/OpenAI is selected, but AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_DEPLOYMENT_NAME is missing"
+            )
+        OpenAI = _load_openai_client_class()
+        api_key = AZURE_OPENAI_API_KEY or os.getenv("AZURE_INFERENCE_CREDENTIAL")
+        if not api_key:
+            raise RuntimeError("Azure Foundry/OpenAI requires AZURE_OPENAI_API_KEY, AZURE_FOUNDRY_API_KEY, or AZURE_INFERENCE_CREDENTIAL")
+        client = OpenAI(api_key=api_key, base_url=_openai_base_url(AZURE_OPENAI_ENDPOINT))
+
+        def _invoke(prompt_input: Any) -> str:
+            completion_kwargs: dict[str, Any] = {
+                "model": AZURE_OPENAI_DEPLOYMENT,
+                "messages": _prompt_to_messages(prompt_input),
+                "temperature": temperature,
+            }
+            if require_json:
+                completion_kwargs["response_format"] = {"type": "json_object"}
+            response = client.chat.completions.create(**completion_kwargs)
+            return response.choices[0].message.content or ""
+
+        return RunnableLambda(_invoke)
+
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is not configured")
+
+    ChatGroq = _load_chat_groq_class()
+    kwargs: dict[str, Any] = {
+        "model_name": GROQ_MODEL,
+        "temperature": temperature,
+        "groq_api_key": GROQ_API_KEY,
+    }
+    if require_json:
+        kwargs["model_kwargs"] = {"response_format": {"type": "json_object"}}
+    return ChatGroq(**kwargs)
 
 
 def create_neo4j_driver(uri: str = NEO4J_URI, user: str = NEO4J_USER, password: str = NEO4J_PASSWORD, *, max_retries: int = 3):

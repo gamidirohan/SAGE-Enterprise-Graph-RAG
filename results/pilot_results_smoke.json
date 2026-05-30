@@ -1,0 +1,1042 @@
+[
+  {
+    "query_index": 1,
+    "query": "What is the data retention policy for employee records?",
+    "reference": "Employee records are retained for 7 years after termination.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document {doc_id:'doc-policy-001'}) RETURN d LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.1-8b-instant",
+    "embedding_model": "all-mpnet-base-v2",
+    "sage_response": {
+      "question": "What is the data retention policy for employee records?",
+      "answer": "MOCK ANSWER for: What is the data retention policy for employee records?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "What is the data retention policy for employee records?",
+      "answer": "MOCK ANSWER for: What is the data retention policy for employee records?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (d:Document {doc_id:'doc-policy-001'}) RETURN d LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 2,
+    "query": "Who does Alice Johnson report to?",
+    "reference": "Alice Johnson reports to Bob Smith.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Person {name:'Alice Johnson'})-[:REPORTS_TO]->(m:Person) RETURN m LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.1-8b-instant",
+    "embedding_model": "all-mpnet-base-v2",
+    "sage_response": {
+      "question": "Who does Alice Johnson report to?",
+      "answer": "MOCK ANSWER for: Who does Alice Johnson report to?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "Who does Alice Johnson report to?",
+      "answer": "MOCK ANSWER for: Who does Alice Johnson report to?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (p:Person {name:'Alice Johnson'})-[:REPORTS_TO]->(m:Person) RETURN m LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 3,
+    "query": "What is the office address for HQ?",
+    "reference": "The HQ office address is 123 Enterprise Way, Suite 400.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document {doc_id:'doc-facility-001'}) RETURN d.address LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.1-8b-instant",
+    "embedding_model": "all-mpnet-base-v2",
+    "sage_response": {
+      "question": "What is the office address for HQ?",
+      "answer": "MOCK ANSWER for: What is the office address for HQ?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "What is the office address for HQ?",
+      "answer": "MOCK ANSWER for: What is the office address for HQ?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (d:Document {doc_id:'doc-facility-001'}) RETURN d.address LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 4,
+    "query": "Who was the manager of Project Alpha in 2022?",
+    "reference": "Bob Smith was the manager of Project Alpha in 2022.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(m:Person) WHERE m.role='manager' AND m.tenure_start <= '2022-12-31' RETURN m LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.1-8b-instant",
+    "embedding_model": "all-mpnet-base-v2",
+    "sage_response": {
+      "question": "Who was the manager of Project Alpha in 2022?",
+      "answer": "MOCK ANSWER for: Who was the manager of Project Alpha in 2022?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "Who was the manager of Project Alpha in 2022?",
+      "answer": "MOCK ANSWER for: Who was the manager of Project Alpha in 2022?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(m:Person) WHERE m.role='manager' AND m.tenure_start <= '2022-12-31' RETURN m LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 5,
+    "query": "Find all engineers on Project Alpha.",
+    "reference": "Engineers on Project Alpha: Bob Smith, Diana Wilson.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(x:Person) WHERE 'Engineering' IN x.team RETURN x.name LIMIT 10"
+      ]
+    },
+    "llm_model": "llama-3.1-8b-instant",
+    "embedding_model": "all-mpnet-base-v2",
+    "sage_response": {
+      "question": "Find all engineers on Project Alpha.",
+      "answer": "MOCK ANSWER for: Find all engineers on Project Alpha.",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "Find all engineers on Project Alpha.",
+      "answer": "MOCK ANSWER for: Find all engineers on Project Alpha.",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(x:Person) WHERE 'Engineering' IN x.team RETURN x.name LIMIT 10",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 1,
+    "query": "What is the data retention policy for employee records?",
+    "reference": "Employee records are retained for 7 years after termination.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document {doc_id:'doc-policy-001'}) RETURN d LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.1-8b-instant",
+    "embedding_model": "multi-qa-mpnet-base-dot-v1",
+    "sage_response": {
+      "question": "What is the data retention policy for employee records?",
+      "answer": "MOCK ANSWER for: What is the data retention policy for employee records?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "What is the data retention policy for employee records?",
+      "answer": "MOCK ANSWER for: What is the data retention policy for employee records?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (d:Document {doc_id:'doc-policy-001'}) RETURN d LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 2,
+    "query": "Who does Alice Johnson report to?",
+    "reference": "Alice Johnson reports to Bob Smith.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Person {name:'Alice Johnson'})-[:REPORTS_TO]->(m:Person) RETURN m LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.1-8b-instant",
+    "embedding_model": "multi-qa-mpnet-base-dot-v1",
+    "sage_response": {
+      "question": "Who does Alice Johnson report to?",
+      "answer": "MOCK ANSWER for: Who does Alice Johnson report to?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "Who does Alice Johnson report to?",
+      "answer": "MOCK ANSWER for: Who does Alice Johnson report to?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (p:Person {name:'Alice Johnson'})-[:REPORTS_TO]->(m:Person) RETURN m LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 3,
+    "query": "What is the office address for HQ?",
+    "reference": "The HQ office address is 123 Enterprise Way, Suite 400.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document {doc_id:'doc-facility-001'}) RETURN d.address LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.1-8b-instant",
+    "embedding_model": "multi-qa-mpnet-base-dot-v1",
+    "sage_response": {
+      "question": "What is the office address for HQ?",
+      "answer": "MOCK ANSWER for: What is the office address for HQ?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "What is the office address for HQ?",
+      "answer": "MOCK ANSWER for: What is the office address for HQ?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (d:Document {doc_id:'doc-facility-001'}) RETURN d.address LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 4,
+    "query": "Who was the manager of Project Alpha in 2022?",
+    "reference": "Bob Smith was the manager of Project Alpha in 2022.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(m:Person) WHERE m.role='manager' AND m.tenure_start <= '2022-12-31' RETURN m LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.1-8b-instant",
+    "embedding_model": "multi-qa-mpnet-base-dot-v1",
+    "sage_response": {
+      "question": "Who was the manager of Project Alpha in 2022?",
+      "answer": "MOCK ANSWER for: Who was the manager of Project Alpha in 2022?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "Who was the manager of Project Alpha in 2022?",
+      "answer": "MOCK ANSWER for: Who was the manager of Project Alpha in 2022?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(m:Person) WHERE m.role='manager' AND m.tenure_start <= '2022-12-31' RETURN m LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 5,
+    "query": "Find all engineers on Project Alpha.",
+    "reference": "Engineers on Project Alpha: Bob Smith, Diana Wilson.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(x:Person) WHERE 'Engineering' IN x.team RETURN x.name LIMIT 10"
+      ]
+    },
+    "llm_model": "llama-3.1-8b-instant",
+    "embedding_model": "multi-qa-mpnet-base-dot-v1",
+    "sage_response": {
+      "question": "Find all engineers on Project Alpha.",
+      "answer": "MOCK ANSWER for: Find all engineers on Project Alpha.",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "Find all engineers on Project Alpha.",
+      "answer": "MOCK ANSWER for: Find all engineers on Project Alpha.",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(x:Person) WHERE 'Engineering' IN x.team RETURN x.name LIMIT 10",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 1,
+    "query": "What is the data retention policy for employee records?",
+    "reference": "Employee records are retained for 7 years after termination.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document {doc_id:'doc-policy-001'}) RETURN d LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.3-70b-versatile",
+    "embedding_model": "all-mpnet-base-v2",
+    "sage_response": {
+      "question": "What is the data retention policy for employee records?",
+      "answer": "MOCK ANSWER for: What is the data retention policy for employee records?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "What is the data retention policy for employee records?",
+      "answer": "MOCK ANSWER for: What is the data retention policy for employee records?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (d:Document {doc_id:'doc-policy-001'}) RETURN d LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 2,
+    "query": "Who does Alice Johnson report to?",
+    "reference": "Alice Johnson reports to Bob Smith.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Person {name:'Alice Johnson'})-[:REPORTS_TO]->(m:Person) RETURN m LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.3-70b-versatile",
+    "embedding_model": "all-mpnet-base-v2",
+    "sage_response": {
+      "question": "Who does Alice Johnson report to?",
+      "answer": "MOCK ANSWER for: Who does Alice Johnson report to?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "Who does Alice Johnson report to?",
+      "answer": "MOCK ANSWER for: Who does Alice Johnson report to?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (p:Person {name:'Alice Johnson'})-[:REPORTS_TO]->(m:Person) RETURN m LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 3,
+    "query": "What is the office address for HQ?",
+    "reference": "The HQ office address is 123 Enterprise Way, Suite 400.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document {doc_id:'doc-facility-001'}) RETURN d.address LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.3-70b-versatile",
+    "embedding_model": "all-mpnet-base-v2",
+    "sage_response": {
+      "question": "What is the office address for HQ?",
+      "answer": "MOCK ANSWER for: What is the office address for HQ?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "What is the office address for HQ?",
+      "answer": "MOCK ANSWER for: What is the office address for HQ?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (d:Document {doc_id:'doc-facility-001'}) RETURN d.address LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 4,
+    "query": "Who was the manager of Project Alpha in 2022?",
+    "reference": "Bob Smith was the manager of Project Alpha in 2022.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(m:Person) WHERE m.role='manager' AND m.tenure_start <= '2022-12-31' RETURN m LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.3-70b-versatile",
+    "embedding_model": "all-mpnet-base-v2",
+    "sage_response": {
+      "question": "Who was the manager of Project Alpha in 2022?",
+      "answer": "MOCK ANSWER for: Who was the manager of Project Alpha in 2022?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "Who was the manager of Project Alpha in 2022?",
+      "answer": "MOCK ANSWER for: Who was the manager of Project Alpha in 2022?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(m:Person) WHERE m.role='manager' AND m.tenure_start <= '2022-12-31' RETURN m LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 5,
+    "query": "Find all engineers on Project Alpha.",
+    "reference": "Engineers on Project Alpha: Bob Smith, Diana Wilson.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(x:Person) WHERE 'Engineering' IN x.team RETURN x.name LIMIT 10"
+      ]
+    },
+    "llm_model": "llama-3.3-70b-versatile",
+    "embedding_model": "all-mpnet-base-v2",
+    "sage_response": {
+      "question": "Find all engineers on Project Alpha.",
+      "answer": "MOCK ANSWER for: Find all engineers on Project Alpha.",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "Find all engineers on Project Alpha.",
+      "answer": "MOCK ANSWER for: Find all engineers on Project Alpha.",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(x:Person) WHERE 'Engineering' IN x.team RETURN x.name LIMIT 10",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 1,
+    "query": "What is the data retention policy for employee records?",
+    "reference": "Employee records are retained for 7 years after termination.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document {doc_id:'doc-policy-001'}) RETURN d LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.3-70b-versatile",
+    "embedding_model": "multi-qa-mpnet-base-dot-v1",
+    "sage_response": {
+      "question": "What is the data retention policy for employee records?",
+      "answer": "MOCK ANSWER for: What is the data retention policy for employee records?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "What is the data retention policy for employee records?",
+      "answer": "MOCK ANSWER for: What is the data retention policy for employee records?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (d:Document {doc_id:'doc-policy-001'}) RETURN d LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 2,
+    "query": "Who does Alice Johnson report to?",
+    "reference": "Alice Johnson reports to Bob Smith.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Person {name:'Alice Johnson'})-[:REPORTS_TO]->(m:Person) RETURN m LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.3-70b-versatile",
+    "embedding_model": "multi-qa-mpnet-base-dot-v1",
+    "sage_response": {
+      "question": "Who does Alice Johnson report to?",
+      "answer": "MOCK ANSWER for: Who does Alice Johnson report to?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "Who does Alice Johnson report to?",
+      "answer": "MOCK ANSWER for: Who does Alice Johnson report to?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (p:Person {name:'Alice Johnson'})-[:REPORTS_TO]->(m:Person) RETURN m LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 3,
+    "query": "What is the office address for HQ?",
+    "reference": "The HQ office address is 123 Enterprise Way, Suite 400.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (d:Document {doc_id:'doc-facility-001'}) RETURN d.address LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.3-70b-versatile",
+    "embedding_model": "multi-qa-mpnet-base-dot-v1",
+    "sage_response": {
+      "question": "What is the office address for HQ?",
+      "answer": "MOCK ANSWER for: What is the office address for HQ?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "What is the office address for HQ?",
+      "answer": "MOCK ANSWER for: What is the office address for HQ?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (d:Document {doc_id:'doc-facility-001'}) RETURN d.address LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 4,
+    "query": "Who was the manager of Project Alpha in 2022?",
+    "reference": "Bob Smith was the manager of Project Alpha in 2022.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(m:Person) WHERE m.role='manager' AND m.tenure_start <= '2022-12-31' RETURN m LIMIT 1"
+      ]
+    },
+    "llm_model": "llama-3.3-70b-versatile",
+    "embedding_model": "multi-qa-mpnet-base-dot-v1",
+    "sage_response": {
+      "question": "Who was the manager of Project Alpha in 2022?",
+      "answer": "MOCK ANSWER for: Who was the manager of Project Alpha in 2022?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "Who was the manager of Project Alpha in 2022?",
+      "answer": "MOCK ANSWER for: Who was the manager of Project Alpha in 2022?",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(m:Person) WHERE m.role='manager' AND m.tenure_start <= '2022-12-31' RETURN m LIMIT 1",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  },
+  {
+    "query_index": 5,
+    "query": "Find all engineers on Project Alpha.",
+    "reference": "Engineers on Project Alpha: Bob Smith, Diana Wilson.",
+    "gold_evidence": {
+      "cypher_paths": [
+        "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(x:Person) WHERE 'Engineering' IN x.team RETURN x.name LIMIT 10"
+      ]
+    },
+    "llm_model": "llama-3.3-70b-versatile",
+    "embedding_model": "multi-qa-mpnet-base-dot-v1",
+    "sage_response": {
+      "question": "Find all engineers on Project Alpha.",
+      "answer": "MOCK ANSWER for: Find all engineers on Project Alpha.",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "traditional_response": {
+      "question": "Find all engineers on Project Alpha.",
+      "answer": "MOCK ANSWER for: Find all engineers on Project Alpha.",
+      "thinking": [
+        "mock_step_1",
+        "mock_step_2"
+      ],
+      "context": [
+        {
+          "type": "mock",
+          "note": "no real context in mock mode"
+        }
+      ],
+      "latency": 0.001
+    },
+    "similarity": null,
+    "rouge": null,
+    "llm_evaluation": null,
+    "grounding_checks": [
+      {
+        "cypher": "MATCH (p:Project {name:'Project Alpha'})<-[:WORKS_ON]-(x:Person) WHERE 'Engineering' IN x.team RETURN x.name LIMIT 10",
+        "exists": false,
+        "error": "no_neo4j_driver"
+      }
+    ]
+  }
+]

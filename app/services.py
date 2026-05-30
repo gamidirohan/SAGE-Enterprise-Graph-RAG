@@ -515,13 +515,17 @@ CHAT_PROMPT = ChatPromptTemplate.from_messages(
             - Do not emit JSON code fences, metadata labels, raw trace fields, document IDs, fact IDs, or reasoning notes
             - Never expose internal identifiers or backend metadata such as canonical keys, group IDs, internal subject codes, sender IDs, or similarity scores
             - Do not mention the answer mode, explanation policy, or why the answer is short or long
-            - Do not invent graph paths, document IDs, policy IDs, timestamps, approvals, or reasoning steps that are not supported by the provided context
+            - Do not invent graph paths, document IDs, policy IDs, timestamps, approvals, or reasoning steps that are not supported by the retrieved evidence
             - Treat canonical facts as higher-trust evidence than chunk summaries when both are present
             - Use Fact Time, Evidence Last Seen, Source Message Time, Message Time, and Retrieved At fields only to choose the latest/current evidence and resolve conflicts
             - Do not expose timestamp metadata labels such as Fact Time, Evidence Last Seen, Source Message Time, Message Time, or Retrieved At in the visible answer unless the user explicitly asks for source or retrieval timing
             - If the user asks for a deadline, schedule, or event time, provide only the relevant user-facing date/time, not the retrieval/source metadata trail
             - If evidence is incomplete or weak, say that clearly in the visible answer instead of overstating confidence
             - If answer doesn't exist in the context, let the output know that. DO NOT HALLUCINATE.
+            - Answer the user's question directly. Do not respond to the system instructions, planner text, tool labels, or any other meta prompt content.
+            - If a recent people-chat window is provided, use it to resolve who said what to whom and in what order.
+            - Treat prior assistant answers as low-trust context unless the retrieved evidence or message window independently supports them.
+            - If the recent people-chat window contains conflicting claims, prefer the latest timestamped message unless the user explicitly asks for historical state.
             Answer mode:
             - Requested answer mode: {answer_mode}
             - If mode is `short`, keep the answer compact and only add bullets if they materially help
@@ -544,7 +548,10 @@ CHAT_PROMPT = ChatPromptTemplate.from_messages(
             Here is the relevant context from the documents:
             {context}
 
-            Respond to the user's question using only the provided context and return JSON only:
+            Here is the recent people chat window:
+            {conversation_window}
+
+            Respond to the user's question directly. Do not mention the context, the retrieval process, or internal evidence labels. Return JSON only:
             """,
         ),
     ]
@@ -552,16 +559,7 @@ CHAT_PROMPT = ChatPromptTemplate.from_messages(
 
 
 def _create_groq_client(*, temperature: float, require_json: bool = False):
-    if ChatGroq is None:
-        raise RuntimeError("langchain_groq is unavailable")
-    kwargs: Dict[str, Any] = {
-        "model_name": utils.GROQ_MODEL,
-        "temperature": temperature,
-        "groq_api_key": utils.GROQ_API_KEY,
-    }
-    if require_json:
-        kwargs["model_kwargs"] = {"response_format": {"type": "json_object"}}
-    return ChatGroq(**kwargs)
+    return utils.create_chat_llm(temperature=temperature, require_json=require_json)
 
 
 def _extract_context_parts(documents: List[str]) -> List[str]:
@@ -2225,7 +2223,7 @@ def _build_response_context(documents: List[str], retrieval_trace: Optional[Dict
 
 
 def extract_structured_data(document_text: str, doc_id: str) -> Dict[str, Any]:
-    if not utils.GROQ_API_KEY:
+    if not utils.chat_llm_configured():
         return {
             "doc_id": doc_id,
             "sender": "Unknown",
@@ -2621,26 +2619,33 @@ def generate_groq_response(
     documents: List[str],
     user_id: Optional[str] = None,
     retrieval_trace: Optional[Dict[str, Any]] = None,
+    history: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     mode, reason_code = _select_answer_mode(query, retrieval_trace=retrieval_trace)
-    guarded_answer = _build_guarded_abstention_answer(
-        query,
-        documents,
-        mode=mode,
-        reason_code=reason_code,
-        retrieval_trace=retrieval_trace,
-    )
-    if guarded_answer is not None:
-        return guarded_answer
-    fact_backed_answer = _build_fact_backed_answer(
-        query,
-        mode=mode,
-        reason_code=reason_code,
-        retrieval_trace=retrieval_trace,
-    )
-    if fact_backed_answer is not None:
-        return fact_backed_answer
-    if not documents:
+    no_conversation_window = "No recent people chat window was available."
+    conversation_window = _build_conversation_window(query, history=history, retrieval_trace=retrieval_trace)
+    use_people_chat_context = conversation_window != no_conversation_window
+
+    if not use_people_chat_context:
+        guarded_answer = _build_guarded_abstention_answer(
+            query,
+            documents,
+            mode=mode,
+            reason_code=reason_code,
+            retrieval_trace=retrieval_trace,
+        )
+        if guarded_answer is not None:
+            return guarded_answer
+        fact_backed_answer = _build_fact_backed_answer(
+            query,
+            mode=mode,
+            reason_code=reason_code,
+            retrieval_trace=retrieval_trace,
+        )
+        if fact_backed_answer is not None:
+            return fact_backed_answer
+
+    if not documents and conversation_window == no_conversation_window:
         answer_payload = _build_answer_payload(
             mode=mode,
             reason_code=reason_code,
@@ -2657,7 +2662,7 @@ def generate_groq_response(
             "thinking": [],
         }
 
-    if _wants_verbatim_evidence(query):
+    if not use_people_chat_context and _wants_verbatim_evidence(query):
         excerpts = _extract_verbatim_chat_excerpts(retrieval_trace)
         if excerpts:
             summary = excerpts[0]
@@ -2702,6 +2707,11 @@ def generate_groq_response(
             retrieval_guidance = (
                 "Canonical facts are the highest-trust evidence layer. If a canonical fact conflicts with a chunk summary, trust the canonical fact and mention the discrepancy."
             )
+        if use_people_chat_context:
+            retrieval_guidance += (
+                " Use the recent people chat window as additional chat context for speaker, recipient, and recency resolution, "
+                "while still grounding the answer in the retrieved SAGE evidence and the user's actual question."
+            )
         if query_profile.get("wants_list_format"):
             question_shape_guidance = (
                 "The user is asking for multiple items. Keep the answer set-oriented, surface distinct supported items, "
@@ -2732,6 +2742,7 @@ def generate_groq_response(
             {
                 "query": query,
                 "context": context,
+                "conversation_window": conversation_window,
                 "user_context": user_context,
                 "retrieval_guidance": retrieval_guidance,
                 "answer_mode": mode,
@@ -2767,7 +2778,7 @@ def generate_groq_response(
             "thinking": [],
         }
     except Exception as exc:
-        logger.error(f"Groq API error: {exc}")
+        logger.error(f"LLM API error: {exc}")
         answer_payload = _build_answer_payload(
             mode=ANSWER_MODE_SHORT,
             reason_code=REASON_CODE_FALLBACK_INVALID_JSON,
@@ -2802,7 +2813,7 @@ def _summarize_with_optional_llm(llm, text: str) -> str:
     try:
         return llm.invoke(f"Summarize this content, include the word json in the summary: {text}").content
     except Exception as exc:
-        logger.warning(f"Groq summary failed, using fallback summary: {exc}")
+        logger.warning(f"LLM summary failed, using fallback summary: {exc}")
         return _summarize_text_fallback(text)
 
 
@@ -2810,6 +2821,8 @@ _SHORT_CONTENT_CHAR_LIMIT = 500
 _SHORT_CONTENT_WORD_LIMIT = 200
 
 _TRACE_EVIDENCE_CONTENT_LIMIT = 800
+_CONVERSATION_WINDOW_LIMIT = 20
+_CONVERSATION_WINDOW_CONTENT_LIMIT = 500
 
 
 def _preview_trace_content(value: Any, limit: int = _TRACE_EVIDENCE_CONTENT_LIMIT) -> Optional[str]:
@@ -2827,6 +2840,217 @@ def _preview_trace_content(value: Any, limit: int = _TRACE_EVIDENCE_CONTENT_LIMI
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "…"
+
+
+def _history_field(entry: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in entry and entry.get(key) is not None:
+            return entry.get(key)
+    return None
+
+
+def _window_preview_text(value: Any, *, limit: int = _CONVERSATION_WINDOW_CONTENT_LIMIT) -> str:
+    text = _convert_iso_timestamps_to_ist_text(str(value or "").strip())
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
+def _window_timestamp_label(value: Any) -> str:
+    formatted = _format_context_timestamp(value)
+    return formatted or "Time unknown"
+
+
+def _history_sender_label(entry: Dict[str, Any]) -> str:
+    sender = _history_field(entry, "sender_name", "senderName", "sender", "sender_id", "senderId")
+    if sender:
+        return _normalize_summary_text(sender) or "Unknown sender"
+    role = str(_history_field(entry, "role") or "").strip().lower()
+    if role == "assistant":
+        return "SAGE assistant"
+    if role == "user":
+        return "User"
+    return "Unknown sender"
+
+
+def _history_recipient_label(entry: Dict[str, Any]) -> str:
+    direct_recipient = _history_field(
+        entry,
+        "recipient_name",
+        "recipientName",
+        "receiver_name",
+        "receiverName",
+        "recipient",
+        "receiver",
+    )
+    if direct_recipient:
+        return _normalize_summary_text(direct_recipient) or "Unspecified recipient"
+
+    receiver_ids = _history_field(entry, "receiver_ids", "receiverIds", "recipient_ids", "recipientIds")
+    if isinstance(receiver_ids, list):
+        labels = [_normalize_summary_text(value) for value in receiver_ids if _normalize_summary_text(value)]
+        if labels:
+            return ", ".join(labels[:4])
+
+    group_name = _history_field(entry, "group_name", "groupName")
+    if group_name:
+        return _normalize_summary_text(group_name) or "Group chat"
+
+    conversation_type = str(_history_field(entry, "conversation_type", "conversationType") or "").strip().lower()
+    role = str(_history_field(entry, "role") or "").strip().lower()
+    if conversation_type == "sage":
+        return "User" if role == "assistant" else "SAGE assistant"
+    if conversation_type == "group":
+        return "Group chat"
+    return "Unspecified recipient"
+
+
+def _build_history_conversation_window(history: Optional[List[Dict[str, Any]]], *, limit: int = _CONVERSATION_WINDOW_LIMIT) -> List[str]:
+    lines: List[str] = []
+    for entry in list(history or [])[-limit:]:
+        if not isinstance(entry, dict):
+            continue
+        content = _window_preview_text(_history_field(entry, "content", "message", "text"))
+        if not content:
+            continue
+        timestamp = _window_timestamp_label(_history_field(entry, "sent_at", "sentAt", "timestamp"))
+        sender = _history_sender_label(entry)
+        recipient = _history_recipient_label(entry)
+        lines.append(f"- {timestamp} | {sender} -> {recipient} | {content}")
+    return lines
+
+
+def _candidate_window_doc_ids(retrieval_trace: Optional[Dict[str, Any]]) -> List[str]:
+    doc_ids: List[str] = []
+    for item in (retrieval_trace or {}).get("evidence") or []:
+        doc_id = (item.get("document") or {}).get("doc_id")
+        if doc_id and doc_id not in doc_ids:
+            doc_ids.append(str(doc_id))
+        if len(doc_ids) >= _CONVERSATION_WINDOW_LIMIT:
+            break
+    return doc_ids
+
+
+def _candidate_window_conversation_ids(retrieval_trace: Optional[Dict[str, Any]]) -> List[str]:
+    conversation_ids: List[str] = []
+    for item in (retrieval_trace or {}).get("evidence") or []:
+        conversation_id = (item.get("document") or {}).get("conversation_id")
+        if conversation_id and conversation_id not in conversation_ids:
+            conversation_ids.append(str(conversation_id))
+    return conversation_ids
+
+
+def _fetch_recent_graph_messages(
+    query: str,
+    *,
+    retrieval_trace: Optional[Dict[str, Any]] = None,
+    limit: int = _CONVERSATION_WINDOW_LIMIT,
+) -> List[Dict[str, Any]]:
+    candidate_doc_ids = _candidate_window_doc_ids(retrieval_trace)
+    conversation_ids = _candidate_window_conversation_ids(retrieval_trace)
+    terms = _extract_query_focus_terms(query)
+    use_term_match = not candidate_doc_ids and not conversation_ids and bool(terms)
+    if not candidate_doc_ids and not conversation_ids and not use_term_match:
+        return []
+
+    driver = None
+    try:
+        driver = utils.create_neo4j_driver()
+        with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
+            rows = session.run(
+                """
+                MATCH (d:Document)
+                OPTIONAL MATCH (sender:Person {id: d.sender})
+                OPTIONAL MATCH (d)-[:RECEIVED_BY]->(receiver:Person)
+                WITH d,
+                     coalesce(sender.name, sender.id, d.sender) AS sender_name,
+                     [name IN collect(DISTINCT coalesce(receiver.name, receiver.id))
+                        WHERE name IS NOT NULL AND trim(name) <> ''] AS receiver_names
+                WHERE coalesce(d.conversation_type, '') <> 'sage'
+                  AND (
+                    (size($candidate_doc_ids) > 0 AND d.doc_id IN $candidate_doc_ids)
+                    OR (size($conversation_ids) > 0 AND d.conversation_id IN $conversation_ids)
+                    OR (
+                        $use_term_match
+                        AND any(term IN $terms WHERE
+                            toLower(coalesce(d.content, '')) CONTAINS term
+                            OR toLower(coalesce(d.summary, '')) CONTAINS term
+                            OR toLower(coalesce(d.subject, '')) CONTAINS term
+                            OR toLower(coalesce(sender_name, '')) CONTAINS term
+                            OR any(name IN receiver_names WHERE toLower(name) CONTAINS term)
+                        )
+                    )
+                  )
+                RETURN d.doc_id AS doc_id,
+                       d.content AS content,
+                       d.timestamp AS timestamp,
+                       d.conversation_type AS conversation_type,
+                       d.conversation_id AS conversation_id,
+                       d.group_id AS group_id,
+                       d.subject AS subject,
+                       sender_name AS sender_name,
+                       receiver_names AS receiver_names
+                ORDER BY coalesce(d.timestamp, '') DESC
+                LIMIT $limit
+                """,
+                candidate_doc_ids=candidate_doc_ids,
+                conversation_ids=conversation_ids,
+                terms=terms,
+                use_term_match=use_term_match,
+                limit=max(1, int(limit)),
+            ).data()
+            return [dict(row) for row in rows]
+    except Exception as exc:
+        logger.warning("Failed to fetch recent graph messages for transcript window: %s", exc)
+        return []
+    finally:
+        if driver:
+            driver.close()
+
+
+def _build_graph_conversation_window(
+    query: str,
+    *,
+    retrieval_trace: Optional[Dict[str, Any]] = None,
+    limit: int = _CONVERSATION_WINDOW_LIMIT,
+) -> List[str]:
+    rows = _fetch_recent_graph_messages(query, retrieval_trace=retrieval_trace, limit=limit)
+    if not rows:
+        return []
+
+    lines: List[str] = []
+    for row in reversed(rows):
+        content = _window_preview_text(row.get("content") or row.get("subject"))
+        if not content:
+            continue
+        sender = _normalize_summary_text(row.get("sender_name")) or "Unknown sender"
+        receiver_names = [
+            _normalize_summary_text(value)
+            for value in (row.get("receiver_names") or [])
+            if _normalize_summary_text(value)
+        ]
+        recipient = ", ".join(receiver_names[:4]) if receiver_names else (
+            "Group chat" if str(row.get("conversation_type") or "").strip().lower() == "group" else "Unspecified recipient"
+        )
+        timestamp = _window_timestamp_label(row.get("timestamp"))
+        lines.append(f"- {timestamp} | {sender} -> {recipient} | {content}")
+    return lines
+
+
+def _build_conversation_window(
+    query: str,
+    *,
+    history: Optional[List[Dict[str, Any]]] = None,
+    retrieval_trace: Optional[Dict[str, Any]] = None,
+    limit: int = _CONVERSATION_WINDOW_LIMIT,
+) -> str:
+    graph_lines = _build_graph_conversation_window(query, retrieval_trace=retrieval_trace, limit=limit)
+    if graph_lines:
+        return "Recent people chat evidence (oldest to newest):\n" + "\n".join(graph_lines)
+
+    return "No recent people chat window was available."
 
 
 def _document_exists(session, doc_id: str) -> bool:
@@ -2872,13 +3096,13 @@ def store_in_neo4j(data: Dict[str, Any]) -> bool:
             llm = None
             content = data["content"]
             needs_llm = len(content) > _SHORT_CONTENT_CHAR_LIMIT
-            if needs_llm and utils.GROQ_API_KEY:
+            if needs_llm and utils.chat_llm_configured():
                 try:
                     llm = _create_groq_client(temperature=0.0, require_json=True)
                 except Exception as exc:
-                    logger.warning(f"Failed to initialize Groq client, using fallback summaries: {exc}")
+                    logger.warning(f"Failed to initialize LLM client, using fallback summaries: {exc}")
             elif needs_llm:
-                logger.warning("GROQ_API_KEY not found. Falling back to local summaries for ingestion.")
+                logger.warning("No chat LLM is configured. Falling back to local summaries for ingestion.")
 
             # ── Optimization 2: smart summarization ──
             document_summary = _smart_summarize(llm, content)

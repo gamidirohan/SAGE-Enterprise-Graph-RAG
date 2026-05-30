@@ -158,7 +158,7 @@ def test_chat_endpoint_uses_query_and_generator(monkeypatch):
     monkeypatch.setattr(
         backend,
         "generate_groq_response",
-        lambda _q, _d, user_id=None, retrieval_trace=None: captured.update({"retrieval_trace": retrieval_trace}) or {
+        lambda _q, _d, user_id=None, retrieval_trace=None, history=None: captured.update({"retrieval_trace": retrieval_trace, "history": history}) or {
             "answer": "ok",
             "answer_payload": {
                 "schema_version": 1,
@@ -174,12 +174,14 @@ def test_chat_endpoint_uses_query_and_generator(monkeypatch):
         },
     )
 
-    request = backend.ChatRequest(message="hi", history=[], agentic_mode=False)
+    history = [{"content": "What is Alice Johnson appointed as?", "sender_name": "User"}]
+    request = backend.ChatRequest(message="hi", history=history, agentic_mode=False)
     result = asyncio.run(backend.chat_endpoint(request))
     assert result["answer"] == "ok"
     assert result["answer_payload"]["summary"] == "ok"
     assert result["trace"]["query_type"] == "general_search"
     assert captured["retrieval_trace"]["query_type"] == "general_search"
+    assert captured["history"] == history
 
 
 def test_chat_endpoint_builds_fallback_answer_payload_with_evidence_refs(monkeypatch):
@@ -198,7 +200,7 @@ def test_chat_endpoint_builds_fallback_answer_payload_with_evidence_refs(monkeyp
     monkeypatch.setattr(
         backend,
         "generate_groq_response",
-        lambda _q, _d, user_id=None, retrieval_trace=None: {
+        lambda _q, _d, user_id=None, retrieval_trace=None, history=None: {
             "answer": "Fallback answer",
             "thinking": [],
         },

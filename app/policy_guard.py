@@ -368,6 +368,12 @@ def evaluate_answer(
         profile=profile,
         focus_terms=focus_terms,
     )
+
+    if focus_terms and not uncertainty_answer:
+        query_text = (query or "").lower()
+        answer_text = _answer_text(answer, answer_payload).lower()
+        if _FOCUS_NAME_PATTERN.search(query or "") and not any(term in answer_text for term in focus_terms):
+            issues.append("missing_requested_entity_reference")
     if (
         evidence
         and focus_terms

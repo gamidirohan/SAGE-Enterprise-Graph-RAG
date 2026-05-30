@@ -41,7 +41,7 @@ def test_run_agentic_query_returns_agentic_trace(monkeypatch):
     monkeypatch.setattr(
         agentic.services,
         "generate_groq_response",
-        lambda _query, _documents, user_id=None, retrieval_trace=None: {
+        lambda _query, _documents, user_id=None, retrieval_trace=None, history=None: {
             "answer": "Project Alpha is covered by the retrieved evidence.",
             "answer_payload": {
                 "schema_version": 1,
@@ -306,7 +306,7 @@ def test_run_agentic_query_uses_single_retry_when_critic_requests_it(monkeypatch
     ]
     generator_feedback = []
 
-    def fake_generate(_query, _documents, user_id=None, retrieval_trace=None):
+    def fake_generate(_query, _documents, user_id=None, retrieval_trace=None, history=None):
         generator_feedback.append(dict((retrieval_trace or {}).get("critic_feedback") or {}))
         return responses.pop(0)
 
@@ -972,7 +972,7 @@ def test_agent_generator_creates_grounded_answer(monkeypatch):
     monkeypatch.setattr(
         agentic.services,
         "generate_groq_response",
-        lambda _query, _documents, user_id=None, retrieval_trace=None: {
+        lambda _query, _documents, user_id=None, retrieval_trace=None, history=None: {
             "answer": "The company policy clearly states employees are entitled to 20 days of annual leave.",
             "answer_payload": {
                 "schema_version": 1,
