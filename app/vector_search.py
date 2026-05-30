@@ -41,7 +41,7 @@ CHUNK_FULLTEXT_QUERY = """
         ] AS path_nodes,
         ['PART_OF', type(r)] AS path_relationships
     ORDER BY similarity DESC
-    LIMIT 5
+    LIMIT $candidate_limit
 """
 
 DOCUMENT_FULLTEXT_QUERY = """
@@ -69,7 +69,7 @@ DOCUMENT_FULLTEXT_QUERY = """
         ] AS path_nodes,
         [coalesce(type(r), 'PART_OF')] AS path_relationships
     ORDER BY similarity DESC
-    LIMIT 5
+    LIMIT $candidate_limit
 """
 
 CHUNK_FULLTEXT_QUERY_SHALLOW = """
@@ -93,7 +93,7 @@ CHUNK_FULLTEXT_QUERY_SHALLOW = """
         ] AS path_nodes,
         ['PART_OF'] AS path_relationships
     ORDER BY similarity DESC
-    LIMIT 5
+    LIMIT $candidate_limit
 """
 
 DOCUMENT_FULLTEXT_QUERY_SHALLOW = """
@@ -119,7 +119,7 @@ DOCUMENT_FULLTEXT_QUERY_SHALLOW = """
         ] AS path_nodes,
         ['PART_OF'] AS path_relationships
     ORDER BY similarity DESC
-    LIMIT 5
+    LIMIT $candidate_limit
 """
 
 FACT_FULLTEXT_QUERY = """
@@ -136,7 +136,7 @@ FACT_FULLTEXT_QUERY = """
         d,
         score AS similarity
     ORDER BY similarity DESC
-    LIMIT 5
+    LIMIT $candidate_limit
 """
 
 
@@ -173,10 +173,14 @@ def _evidence_key(item: Dict[str, Any]) -> str:
 def _normalize_trace(trace: Optional[Dict[str, Any]], *, tool_name: str) -> Dict[str, Any]:
     normalized = dict(trace or {})
     evidence = [dict(item) for item in (normalized.get("evidence") or [])]
+    retrieved_at = str(normalized.get("retrieved_at") or services._retrieval_timestamp())
     for item in evidence:
         if item.get("direction") is None:
             item["direction"] = "outgoing" if item.get("relationship") else None
+        item.setdefault("retrieved_at", retrieved_at)
     normalized["evidence"] = evidence
+    if evidence:
+        normalized["retrieved_at"] = retrieved_at
     normalized["result_count"] = len(evidence)
     normalized["max_hop_count"] = max((int(item.get("hop_count") or 0) for item in evidence), default=0)
     normalized["no_evidence"] = not evidence
@@ -205,6 +209,7 @@ def _build_trace_from_rows(
     evidence: List[Dict[str, Any]] = []
     documents: List[str] = []
     matched_entities: List[str] = []
+    retrieved_at = services._retrieval_timestamp()
 
     for row in rows:
         document = services._serialize_neo4j_entity(row.get("d"))
@@ -234,6 +239,7 @@ def _build_trace_from_rows(
             "chunk_summary": row.get("chunk_summary") or document.get("summary") or document.get("subject") or "No summary",
             "similarity": similarity,
             "rank_score": similarity,
+            "retrieved_at": retrieved_at,
             "relationship": relationship,
             "direction": row.get("direction") or "outgoing",
             "retrieval_path": retrieval_path,
@@ -280,6 +286,7 @@ def _build_trace_from_rows(
         "query_profile": query_profile,
         "graph_depth": {"seed_hops": context_hops},
         "matched_entities": matched_entities,
+        "retrieved_at": retrieved_at,
         "result_count": len(evidence),
         "max_hop_count": max((int(item.get("hop_count") or 0) for item in evidence), default=0),
         "retrieval_path": evidence[0]["retrieval_path"] if evidence else services._build_path_summary(personalized_lookup, None)["path"],
@@ -308,7 +315,7 @@ def fulltext_retrieve(query: str, *, user_id: Optional[str] = None, context_hops
                 services._prepare_chunk_result(row, focus_terms=focus_terms, reports_to_lookup=reports_to_lookup)
                 for row in session.run(
                     CHUNK_FULLTEXT_QUERY if resolved_context_hops >= services.DEFAULT_SEED_CONTEXT_HOPS else CHUNK_FULLTEXT_QUERY_SHALLOW,
-                    {"index_name": CHUNK_FULLTEXT_INDEX, "query": query},
+                    {"index_name": CHUNK_FULLTEXT_INDEX, "query": query, "candidate_limit": services.DEFAULT_RETRIEVAL_LIMIT},
                 ).data()
                 if row.get("chunk_id") or row.get("chunk_summary")
             ]
@@ -316,7 +323,7 @@ def fulltext_retrieve(query: str, *, user_id: Optional[str] = None, context_hops
                 services._prepare_chunk_result(row, focus_terms=focus_terms, reports_to_lookup=reports_to_lookup)
                 for row in session.run(
                     DOCUMENT_FULLTEXT_QUERY if resolved_context_hops >= services.DEFAULT_SEED_CONTEXT_HOPS else DOCUMENT_FULLTEXT_QUERY_SHALLOW,
-                    {"index_name": DOCUMENT_FULLTEXT_INDEX, "query": query},
+                    {"index_name": DOCUMENT_FULLTEXT_INDEX, "query": query, "candidate_limit": services.DEFAULT_RETRIEVAL_LIMIT},
                 ).data()
                 if row.get("chunk_id") or row.get("chunk_summary")
             ]
@@ -324,7 +331,7 @@ def fulltext_retrieve(query: str, *, user_id: Optional[str] = None, context_hops
                 row
                 for row in session.run(
                     FACT_FULLTEXT_QUERY,
-                    {"index_name": FACT_FULLTEXT_INDEX, "query": query},
+                    {"index_name": FACT_FULLTEXT_INDEX, "query": query, "candidate_limit": services.DEFAULT_RETRIEVAL_LIMIT},
                 ).data()
                 if row.get("fact_id")
             ]
@@ -349,7 +356,7 @@ def fulltext_retrieve(query: str, *, user_id: Optional[str] = None, context_hops
                 tool_name="fulltext",
             ),
         }
-    merged_rows = services._merge_ranked_results(chunk_rows, doc_rows, limit=5)
+    merged_rows = services._merge_ranked_results(chunk_rows, doc_rows, limit=services.DEFAULT_RETRIEVAL_LIMIT)
     chunk_result = _build_trace_from_rows(
         merged_rows,
         query=query,
@@ -364,7 +371,7 @@ def fulltext_retrieve(query: str, *, user_id: Optional[str] = None, context_hops
         tool_name="fulltext",
         context_hops=resolved_context_hops,
     )
-    return merge_results(fact_result, chunk_result, limit=6)
+    return merge_results(fact_result, chunk_result, limit=services.DEFAULT_RETRIEVAL_LIMIT)
 
 
 def _eval_allowed_doc_ids() -> List[str]:
@@ -398,6 +405,7 @@ def _fact_evidence_from_rows(
     documents: List[str] = []
     matched_entities: List[str] = []
     personalized_lookup = bool(user_id and services._is_personalized_lookup(query))
+    retrieved_at = services._retrieval_timestamp()
 
     for row in rows:
         item = services._prepare_fact_result(
@@ -434,6 +442,7 @@ def _fact_evidence_from_rows(
                 "fact_summary": fact_summary,
                 "similarity": similarity,
                 "rank_score": rank_score,
+                "retrieved_at": retrieved_at,
                 "relationship": "CANONICAL_FACT",
                 "retrieval_path": "CanonicalFact <-SUPPORTS/CONTRADICTS- Claim <-HAS_CLAIM- Document",
                 "hop_count": max(context_hops, 2),
@@ -504,6 +513,7 @@ def _fact_evidence_from_rows(
             "query_profile": services.query_shape.analyze_query(query) if hasattr(services, "query_shape") else None,
             "graph_depth": {"seed_hops": context_hops},
             "matched_entities": matched_entities,
+            "retrieved_at": retrieved_at,
             "result_count": len(evidence),
             "max_hop_count": max((int(item.get("hop_count") or 0) for item in evidence), default=0),
             "retrieval_path": evidence[0]["retrieval_path"] if evidence else services._build_path_summary(personalized_lookup, None)["path"],
@@ -598,7 +608,7 @@ def fixture_scoped_retrieve(
         driver.close()
 
     chunk_result = _build_trace_from_rows(
-        services._merge_ranked_results(chunk_rows, [], limit=8),
+        services._merge_ranked_results(chunk_rows, [], limit=services.DEFAULT_RETRIEVAL_LIMIT),
         query=query,
         user_id=user_id,
         tool_name=strategy,
@@ -611,14 +621,14 @@ def fixture_scoped_retrieve(
         tool_name=strategy,
         context_hops=resolved_context_hops,
     )
-    return merge_results(fact_result, chunk_result, limit=8)
+    return merge_results(fact_result, chunk_result, limit=services.DEFAULT_RETRIEVAL_LIMIT)
 
 
 def merge_results(
     existing: Dict[str, Any],
     incoming: Dict[str, Any],
     *,
-    limit: int = 6,
+    limit: int = services.DEFAULT_RETRIEVAL_LIMIT,
 ) -> Dict[str, Any]:
     existing_trace = dict(existing.get("trace") or {})
     incoming_trace = dict(incoming.get("trace") or {})
@@ -653,6 +663,7 @@ def merge_results(
         **incoming_trace,
         "matched_entities": matched_entities,
         "evidence": merged_evidence,
+        "retrieved_at": incoming_trace.get("retrieved_at") or existing_trace.get("retrieved_at"),
         "result_count": len(merged_evidence),
         "max_hop_count": max((int(item.get("hop_count") or 0) for item in merged_evidence), default=0),
         "retrieval_path": (merged_evidence[0].get("retrieval_path") if merged_evidence else None)

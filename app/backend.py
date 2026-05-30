@@ -105,6 +105,113 @@ def _format_sse(event_name: str, payload: Dict[str, Any]) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, default=str)}\n\n"
 
 
+def _neo4j_identifier(value: str) -> str:
+    return f"`{value.replace('`', '``')}`"
+
+
+def _single_count(session: Any, query: str) -> int:
+    rows = session.run(query).data()
+    if not rows:
+        return 0
+    try:
+        return int(rows[0].get("Count") or rows[0].get("count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _legacy_graph_summary_counts(session: Any) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int]:
+    node_counts = session.run(
+        """
+        MATCH (n)
+        RETURN labels(n)[0] AS Label, count(*) AS Count
+        ORDER BY Count DESC
+        """
+    ).data()
+    rel_counts = session.run(
+        """
+        MATCH ()-[r]->()
+        RETURN type(r) AS RelationType, count(*) AS Count
+        ORDER BY Count DESC
+        """
+    ).data()
+    total_nodes = sum(int(row.get("Count") or row.get("count") or 0) for row in node_counts)
+    total_relationships = sum(int(row.get("Count") or row.get("count") or 0) for row in rel_counts)
+    return node_counts, rel_counts, total_nodes, total_relationships
+
+
+def _fast_graph_summary_counts(session: Any) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int]:
+    total_nodes = _single_count(
+        session,
+        """
+        MATCH (n)
+        RETURN count(n) AS Count
+        """,
+    )
+    total_relationships = _single_count(
+        session,
+        """
+        MATCH ()-[r]->()
+        RETURN count(r) AS Count
+        """,
+    )
+
+    label_rows = session.run(
+        """
+        CALL db.labels() YIELD label
+        RETURN label
+        ORDER BY label
+        """
+    ).data()
+    node_counts: List[Dict[str, Any]] = []
+    for row in label_rows:
+        label = str(row.get("label") or "").strip()
+        if not label:
+            continue
+        count = _single_count(
+            session,
+            f"""
+            MATCH (n:{_neo4j_identifier(label)})
+            RETURN count(n) AS Count
+            """,
+        )
+        node_counts.append({"Label": label, "Count": count})
+    node_counts.sort(key=lambda item: (-int(item.get("Count") or 0), str(item.get("Label") or "")))
+
+    rel_type_rows = session.run(
+        """
+        CALL db.relationshipTypes() YIELD relationshipType
+        RETURN relationshipType
+        ORDER BY relationshipType
+        """
+    ).data()
+    rel_counts: List[Dict[str, Any]] = []
+    for row in rel_type_rows:
+        rel_type = str(row.get("relationshipType") or "").strip()
+        if not rel_type:
+            continue
+        count = _single_count(
+            session,
+            f"""
+            MATCH ()-[r:{_neo4j_identifier(rel_type)}]->()
+            RETURN count(r) AS Count
+            """,
+        )
+        rel_counts.append({"RelationType": rel_type, "Count": count})
+    rel_counts.sort(key=lambda item: (-int(item.get("Count") or 0), str(item.get("RelationType") or "")))
+
+    return node_counts, rel_counts, total_nodes, total_relationships
+
+
+def _graph_summary_counts(session: Any) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int]:
+    try:
+        return _fast_graph_summary_counts(session)
+    except (ServiceUnavailable, SessionExpired):
+        raise
+    except Exception as exc:
+        logger.warning("Falling back to scan-based graph summary counts: %s", exc)
+        return _legacy_graph_summary_counts(session)
+
+
 def _stream_agentic_chat(request: ChatRequest, message: str) -> Iterator[str]:
     event_queue: queue.Queue = queue.Queue()
 
@@ -163,6 +270,8 @@ class DocumentProcessResponse(BaseModel):
 
 
 class GraphDebugResponse(BaseModel):
+    total_nodes: Optional[int] = None
+    total_relationships: Optional[int] = None
     node_counts: List[Dict[str, Any]]
     rel_counts: List[Dict[str, Any]]
     sample_docs: List[Dict[str, Any]]
@@ -894,22 +1003,11 @@ async def debug_graph_endpoint(
     driver = utils.create_neo4j_driver()
     try:
         with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
-            node_counts = session.run(
-                """
-                MATCH (n)
-                RETURN labels(n)[0] AS Label, count(*) AS Count
-                ORDER BY Count DESC
-                """
-            ).data()
-            rel_counts = session.run(
-                """
-                MATCH ()-[r]->()
-                RETURN type(r) AS RelationType, count(*) AS Count
-                ORDER BY Count DESC
-                """
-            ).data()
+            node_counts, rel_counts, total_nodes, total_relationships = _graph_summary_counts(session)
             if summary_only:
                 return {
+                    "total_nodes": total_nodes,
+                    "total_relationships": total_relationships,
                     "node_counts": node_counts,
                     "rel_counts": rel_counts,
                     "sample_docs": [],
@@ -950,6 +1048,8 @@ async def debug_graph_endpoint(
             ).data()
 
         return {
+            "total_nodes": total_nodes,
+            "total_relationships": total_relationships,
             "node_counts": node_counts,
             "rel_counts": rel_counts,
             "sample_docs": sample_docs,

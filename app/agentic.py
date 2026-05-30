@@ -639,7 +639,7 @@ def _run_retrieval_round(
             "trace": dict(state.get("trace") or {}),
         },
         result,
-        limit=6,
+        limit=services.DEFAULT_RETRIEVAL_LIMIT,
     )
     _emit_event(
         state,

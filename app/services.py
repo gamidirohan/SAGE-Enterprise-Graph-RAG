@@ -7,6 +7,7 @@ chat response generation, and other domain-level application behavior.
 import json
 import logging
 import math
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -38,6 +39,7 @@ RECENCY_BOOST_MAX = 0.18
 RECENCY_DECAY_DAYS = 21.0
 DEFAULT_SEED_CONTEXT_HOPS = 1
 MAX_SEED_CONTEXT_HOPS = 1
+DEFAULT_RETRIEVAL_LIMIT = max(1, int(os.getenv("SAGE_RETRIEVAL_LIMIT", "20")))
 
 GRAPH_VECTOR_QUERY = """
     MATCH (c:Chunk)-[:PART_OF]->(d:Document)
@@ -59,7 +61,7 @@ GRAPH_VECTOR_QUERY = """
          END AS recency_weight
     WITH c, d, similarity + recency_weight AS similarity
     ORDER BY similarity DESC
-    LIMIT 3
+    LIMIT $candidate_limit
     MATCH (c)-[r]-(n)
     WITH c, d, similarity, r, n
     RETURN
@@ -99,7 +101,7 @@ PERSON_GRAPH_VECTOR_QUERY = """
          END AS recency_weight
     WITH person, c, d, pd, similarity + recency_weight AS similarity
     ORDER BY similarity DESC
-    LIMIT 3
+    LIMIT $candidate_limit
     MATCH (c)-[r]-(n)
     WITH person, pd, c, d, similarity, r, n
     RETURN
@@ -139,7 +141,7 @@ GRAPH_VECTOR_QUERY_SHALLOW = """
          END AS recency_weight
     WITH c, d, similarity + recency_weight AS similarity
     ORDER BY similarity DESC
-    LIMIT 3
+    LIMIT $candidate_limit
     RETURN
         c.chunk_id AS chunk_id,
         c.summary AS chunk_summary,
@@ -176,7 +178,7 @@ PERSON_GRAPH_VECTOR_QUERY_SHALLOW = """
          END AS recency_weight
     WITH person, c, d, pd, similarity + recency_weight AS similarity
     ORDER BY similarity DESC
-    LIMIT 3
+    LIMIT $candidate_limit
     RETURN
         c.chunk_id AS chunk_id,
         c.summary AS chunk_summary,
@@ -207,7 +209,7 @@ FACT_VECTOR_QUERY = """
          END AS recency_weight
     WITH f, similarity + recency_weight AS similarity
     ORDER BY similarity DESC
-    LIMIT 3
+    LIMIT $candidate_limit
     OPTIONAL MATCH (f)<-[:SUPPORTS]-(claim:Claim)<-[:HAS_CLAIM]-(d:Document)
     WITH f, similarity, collect(DISTINCT d)[0] AS d
     RETURN f.fact_id AS fact_id, f.summary AS fact_summary, f, d, similarity
@@ -227,7 +229,7 @@ PERSON_FACT_VECTOR_QUERY = """
          END AS recency_weight
     WITH f, similarity + recency_weight AS similarity
     ORDER BY similarity DESC
-    LIMIT 3
+    LIMIT $candidate_limit
     OPTIONAL MATCH (f)<-[:SUPPORTS]-(claim:Claim)<-[:HAS_CLAIM]-(d:Document)
     WITH f, similarity, collect(DISTINCT d)[0] AS d
     RETURN f.fact_id AS fact_id, f.summary AS fact_summary, f, d, similarity
@@ -247,7 +249,7 @@ PERSON_TASK_FACT_QUERY = """
     WITH f, collect(DISTINCT d)[0] AS d
     RETURN f.fact_id AS fact_id, f.summary AS fact_summary, f, d, 1.0 AS similarity
     ORDER BY coalesce(f.last_seen_at, f.first_seen_at, '') DESC
-    LIMIT 5
+    LIMIT $candidate_limit
 """
 
 FIRST_PERSON_PATTERN = re.compile(r"\b(i|me|my|mine|myself)\b", re.IGNORECASE)
@@ -258,7 +260,7 @@ DISCOURSE_FIRST_PERSON_PREFIX = re.compile(
 TASK_LOOKUP_PATTERN = re.compile(
     r"\b("
     r"promise|promised|commit|committed|commitment|agreed|supposed to|meant to|"
-    r"assigned|assignment|working on|work on|responsible for|deadline|due|by when|"
+    r"assigned|assignment|working on|work on|responsible for|deadline|due|by when|what time|"
     r"send|sending|share|sharing|deliver|delivering|submit|submitting|upload|uploading|provide|providing|finish|complete"
     r")\b",
     re.IGNORECASE,
@@ -399,6 +401,9 @@ QUERY_FOCUS_STOPWORDS = {
     "be",
     "been",
     "being",
+    "has",
+    "have",
+    "had",
     "now",
     "that",
     "this",
@@ -491,46 +496,58 @@ DOCUMENT_EXTRACTION_PROMPT = ChatPromptTemplate.from_template(
     """
 )
 
-CHAT_PROMPT = ChatPromptTemplate.from_template(
-    """
-    You are SAGE, an enterprise Graph-RAG assistant.
-    Return JSON only with this exact shape:
-    {{
-      "summary": "string",
-      "bullets": ["string"]
-    }}
+CHAT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
+            You are SAGE, an enterprise Graph-RAG assistant.
+            Return JSON only with this exact shape:
+            {{
+              "summary": "string",
+              "bullets": ["string"]
+            }}
 
-    Visible answer contract:
-    - `summary` is always required, non-empty, and contains only user-facing chat text
-    - `bullets` contains only extra user-facing detail points; use an empty array if no extra detail is needed
-    - Do not emit markdown headings like `Answer:` or `Evidence and Provenance:`
-    - Do not emit JSON code fences, metadata labels, raw trace fields, document IDs, fact IDs, or reasoning notes
-    - Never expose internal identifiers or backend metadata such as canonical keys, group IDs, internal subject codes, sender IDs, or similarity scores
-    - Do not mention the answer mode, explanation policy, or why the answer is short or long
-    - Do not invent graph paths, document IDs, policy IDs, timestamps, approvals, or reasoning steps that are not supported by the provided context
-    - Treat canonical facts as higher-trust evidence than chunk summaries when both are present
-    - If evidence is incomplete or weak, say that clearly in the visible answer instead of overstating confidence
+            Visible answer contract:
+            - `summary` is always required, non-empty, and contains only user-facing chat text
+            - `bullets` contains only extra user-facing detail points; use an empty array if no extra detail is needed
+            - Do not emit markdown headings like `Answer:` or `Evidence and Provenance:`
+            - Do not emit JSON code fences, metadata labels, raw trace fields, document IDs, fact IDs, or reasoning notes
+            - Never expose internal identifiers or backend metadata such as canonical keys, group IDs, internal subject codes, sender IDs, or similarity scores
+            - Do not mention the answer mode, explanation policy, or why the answer is short or long
+            - Do not invent graph paths, document IDs, policy IDs, timestamps, approvals, or reasoning steps that are not supported by the provided context
+            - Treat canonical facts as higher-trust evidence than chunk summaries when both are present
+            - Use Fact Time, Evidence Last Seen, Source Message Time, Message Time, and Retrieved At fields only to choose the latest/current evidence and resolve conflicts
+            - Do not expose timestamp metadata labels such as Fact Time, Evidence Last Seen, Source Message Time, Message Time, or Retrieved At in the visible answer unless the user explicitly asks for source or retrieval timing
+            - If the user asks for a deadline, schedule, or event time, provide only the relevant user-facing date/time, not the retrieval/source metadata trail
+            - If evidence is incomplete or weak, say that clearly in the visible answer instead of overstating confidence
+            - If answer doesn't exist in the context, let the output know that. DO NOT HALLUCINATE.
+            Answer mode:
+            - Requested answer mode: {answer_mode}
+            - If mode is `short`, keep the answer compact and only add bullets if they materially help
+            - If mode is `long`, keep one clear summary and add concise bullets when extra detail helps
+            - Long mode means more detail, not less structure
+            - Question shape guidance: {question_shape_guidance}
 
-    Answer mode:
-    - Requested answer mode: {answer_mode}
-    - If mode is `short`, keep the answer compact and only add bullets if they materially help
-    - If mode is `long`, keep one clear summary and add concise bullets when extra detail helps
-    - Long mode means more detail, not less structure
-    - Question shape guidance: {question_shape_guidance}
+            Identity context:
+            {user_context}
 
-    Here is the user's question: {query}
+            Retrieval guidance:
+            {retrieval_guidance}
+            """,
+        ),
+        (
+            "human",
+            """
+            Here is the user's question: {query}
 
-    Identity context:
-    {user_context}
+            Here is the relevant context from the documents:
+            {context}
 
-    Retrieval guidance:
-    {retrieval_guidance}
-
-    Here is the relevant context from the documents (keep in mind you get limited context and that's what you should work with):
-    {context}
-
-    Respond to the user's question using only the provided context and return JSON only:
-    """
+            Respond to the user's question using only the provided context and return JSON only:
+            """,
+        ),
+    ]
 )
 
 
@@ -624,13 +641,19 @@ def _build_guarded_abstention_answer(
     query_type = str(trace.get("query_type") or _classify_query(query))
     query_profile = dict(trace.get("query_profile") or query_shape.analyze_query(query))
     focus_terms = _extract_query_focus_terms(query)
+    minimum_focus_match = _minimum_focus_match_threshold(
+        query,
+        query_type=query_type,
+        query_profile=query_profile,
+        focus_terms=focus_terms,
+    )
 
     reason: Optional[str] = None
     if (
         evidence
         and focus_terms
-        and _requires_direct_focus_match(query, query_type=query_type, query_profile=query_profile)
-        and not any(_evidence_focus_match_score(item, focus_terms) > 0 for item in evidence)
+        and minimum_focus_match > 0
+        and max((_evidence_focus_match_score(item, focus_terms) for item in evidence), default=0) < minimum_focus_match
     ):
         reason = "I couldn't find relevant evidence for that lookup."
     elif any(term in normalized_query for term in UNSUPPORTED_PERSONAL_ATTACK_TERMS):
@@ -1533,6 +1556,10 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _retrieval_timestamp() -> str:
+    return _utcnow().isoformat().replace("+00:00", "Z")
+
+
 def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
     if not value:
         return None
@@ -1554,6 +1581,15 @@ def _format_timestamp_as_ist(value: str) -> str:
         return value
     localized = parsed.astimezone(IST_TIMEZONE)
     return localized.strftime("%Y-%m-%d %I:%M %p IST")
+
+
+def _format_context_timestamp(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return _format_timestamp_as_ist(text)
 
 
 def _convert_iso_timestamps_to_ist_text(text: str) -> str:
@@ -1787,6 +1823,26 @@ def _requires_direct_focus_match(
     if query_type not in {"general_search", "personal_context"}:
         return False
     return _looks_like_direct_lookup_request(query, query_type)
+
+
+def _minimum_focus_match_threshold(
+    query: str,
+    *,
+    query_type: Optional[str],
+    query_profile: Optional[Dict[str, Any]] = None,
+    focus_terms: Optional[List[str]] = None,
+) -> int:
+    profile = dict(query_profile or query_shape.analyze_query(query))
+    terms = list(focus_terms or [])
+    effective_query_type = str(query_type or "").strip()
+
+    if not terms or profile.get("wants_list_format") or profile.get("requires_broad_coverage"):
+        return 0
+    if effective_query_type in {"task_commitment_lookup", "schedule_or_timeline"}:
+        return 2 if len(terms) >= 2 else 0
+    if _requires_direct_focus_match(query, query_type=effective_query_type, query_profile=profile):
+        return 1
+    return 0
 
 
 def _is_displayable_trace_entity(value: Any) -> bool:
@@ -2034,7 +2090,7 @@ def _combine_ranked_results(
     query_type: str,
     focus_terms: Optional[List[str]] = None,
     reports_to_lookup: bool = False,
-    require_focus_match: bool = False,
+    minimum_focus_match: int = 0,
     limit: int = 5,
 ) -> List[Dict[str, Any]]:
     if query_type in FACT_PRIORITY_QUERY_TYPES and fact_results:
@@ -2067,8 +2123,13 @@ def _combine_ranked_results(
         return combined[:limit]
 
     combined = vector_results + fact_results
-    if require_focus_match and focus_terms:
-        combined = [item for item in combined if int(item.get("focus_match_score") or 0) > 0]
+    if focus_terms and minimum_focus_match > 0:
+        combined = [item for item in combined if int(item.get("focus_match_score") or 0) >= minimum_focus_match]
+        if not combined:
+            return []
+        if len(focus_terms) >= 2:
+            strongest_focus = max(int(item.get("focus_match_score") or 0) for item in combined)
+            combined = [item for item in combined if int(item.get("focus_match_score") or 0) == strongest_focus]
         combined.sort(key=_result_rank_value, reverse=True)
         return combined[:limit]
     if query_type == "person_lookup" and focus_terms:
@@ -2103,10 +2164,13 @@ def _build_response_context(documents: List[str], retrieval_trace: Optional[Dict
             object_label = _context_entity_label(fact.get("object_display") or fact.get("object_entity_id") or fact.get("object_key"))
             conversation_type = _normalize_summary_text(document.get("conversation_type") or "")
             time_text = (
-                f"Time: {fact.get('temporal_start')} ({fact.get('temporal_granularity') or 'unresolved'})"
+                f"Fact Time: {fact.get('temporal_start')} ({fact.get('temporal_granularity') or 'unresolved'})"
                 if fact.get("temporal_start")
                 else None
             )
+            last_seen_text = _format_context_timestamp(fact.get("last_seen_at") or fact.get("first_seen_at"))
+            source_message_time = _format_context_timestamp(document.get("timestamp"))
+            retrieved_at = _format_context_timestamp(item.get("retrieved_at") or (retrieval_trace or {}).get("retrieved_at"))
             fact_lines.append(
                 "- "
                 + _join_context_parts(
@@ -2117,6 +2181,9 @@ def _build_response_context(documents: List[str], retrieval_trace: Optional[Dict
                     f"Subject: {subject_label}" if subject_label else None,
                     f"Object: {object_label}" if object_label else None,
                     time_text,
+                    f"Evidence Last Seen: {last_seen_text}" if last_seen_text else None,
+                    f"Source Message Time: {source_message_time}" if source_message_time else None,
+                    f"Retrieved At: {retrieved_at}" if retrieved_at else None,
                     relationship_semantics,
                 )
             )
@@ -2129,6 +2196,8 @@ def _build_response_context(documents: List[str], retrieval_trace: Optional[Dict
             subject_label = _context_entity_label(document.get("subject"))
             sender_label = _context_entity_label(document.get("sender"))
             related_label = _context_entity_label(related_node.get("display_name"))
+            message_time = _format_context_timestamp(document.get("timestamp"))
+            retrieved_at = _format_context_timestamp(item.get("retrieved_at") or (retrieval_trace or {}).get("retrieved_at"))
             chunk_lines.append(
                 "- "
                 + _join_context_parts(
@@ -2136,6 +2205,8 @@ def _build_response_context(documents: List[str], retrieval_trace: Optional[Dict
                     f"Conversation Type: {conversation_type}" if conversation_type else None,
                     f"Subject: {subject_label}" if subject_label else None,
                     f"Sender: {sender_label}" if sender_label else None,
+                    f"Message Time: {message_time}" if message_time else None,
+                    f"Retrieved At: {retrieved_at}" if retrieved_at else None,
                     f"Related Node: {related_label}" if related_label else None,
                 )
             )
@@ -2200,6 +2271,7 @@ def query_graph_with_trace(
     graph_depth["seed_hops"] = resolved_seed_hops
     focus_terms = _extract_query_focus_terms(user_input)
     reports_to_lookup = _is_reports_to_lookup(user_input)
+    retrieved_at = _retrieval_timestamp()
 
     try:
         driver = utils.create_neo4j_driver()
@@ -2215,6 +2287,7 @@ def query_graph_with_trace(
                     query_embedding=query_embedding.tolist(),
                     recency_decay_days=RECENCY_DECAY_DAYS,
                     recency_boost_max=RECENCY_BOOST_MAX,
+                    candidate_limit=DEFAULT_RETRIEVAL_LIMIT,
                 ).data()
                 if row.get("chunk_id") or row.get("chunk_summary")
             ]
@@ -2228,6 +2301,7 @@ def query_graph_with_trace(
                         query_embedding=query_embedding.tolist(),
                         recency_decay_days=RECENCY_DECAY_DAYS,
                         recency_boost_max=RECENCY_BOOST_MAX,
+                        candidate_limit=DEFAULT_RETRIEVAL_LIMIT,
                     ).data()
                     if row.get("chunk_id") or row.get("chunk_summary")
                 ]
@@ -2245,6 +2319,7 @@ def query_graph_with_trace(
                         query_embedding=query_embedding.tolist(),
                         recency_decay_days=RECENCY_DECAY_DAYS,
                         recency_boost_max=RECENCY_BOOST_MAX,
+                        candidate_limit=DEFAULT_RETRIEVAL_LIMIT,
                 ).data()
                 if row.get("fact_id")
             ]
@@ -2265,6 +2340,7 @@ def query_graph_with_trace(
                         query_embedding=query_embedding.tolist(),
                         recency_decay_days=RECENCY_DECAY_DAYS,
                         recency_boost_max=RECENCY_BOOST_MAX,
+                        candidate_limit=DEFAULT_RETRIEVAL_LIMIT,
                     ).data()
                     if row.get("fact_id")
                 ]
@@ -2283,29 +2359,31 @@ def query_graph_with_trace(
                         PERSON_TASK_FACT_QUERY,
                         user_id=user_id,
                         claim_types=sorted(TASK_LIKE_FACT_TYPES),
+                        candidate_limit=DEFAULT_RETRIEVAL_LIMIT,
                     ).data()
                     if row.get("fact_id")
                 ]
 
         if personalized_lookup and query_type in FACT_PRIORITY_QUERY_TYPES:
-            vector_results = _merge_ranked_results(person_results, [], limit=5)
-            fact_results = _merge_ranked_results(exact_task_fact_results + person_fact_results, [], limit=5)
+            vector_results = _merge_ranked_results(person_results, [], limit=DEFAULT_RETRIEVAL_LIMIT)
+            fact_results = _merge_ranked_results(exact_task_fact_results + person_fact_results, [], limit=DEFAULT_RETRIEVAL_LIMIT)
             fact_results = [item for item in fact_results if _fact_result_matches_user(item, user_id)]
         else:
-            vector_results = _merge_ranked_results(person_results, global_results, limit=5)
-            fact_results = _merge_ranked_results(exact_task_fact_results + person_fact_results, global_fact_results, limit=5)
+            vector_results = _merge_ranked_results(person_results, global_results, limit=DEFAULT_RETRIEVAL_LIMIT)
+            fact_results = _merge_ranked_results(exact_task_fact_results + person_fact_results, global_fact_results, limit=DEFAULT_RETRIEVAL_LIMIT)
         combined_results = _combine_ranked_results(
             vector_results,
             fact_results,
             query_type=query_type,
             focus_terms=focus_terms,
             reports_to_lookup=reports_to_lookup,
-            require_focus_match=_requires_direct_focus_match(
+            minimum_focus_match=_minimum_focus_match_threshold(
                 user_input,
                 query_type=query_type,
                 query_profile=query_profile,
+                focus_terms=focus_terms,
             ),
-            limit=5,
+            limit=DEFAULT_RETRIEVAL_LIMIT,
         )
         evidence: List[Dict[str, Any]] = []
         documents: List[str] = []
@@ -2340,6 +2418,7 @@ def query_graph_with_trace(
                     "fact_summary": fact_summary,
                     "similarity": similarity,
                     "rank_score": rank_score,
+                    "retrieved_at": retrieved_at,
                     "relationship": "CANONICAL_FACT",
                     "retrieval_path": path_summary["path"],
                     "hop_count": path_summary["hop_count"],
@@ -2445,6 +2524,7 @@ def query_graph_with_trace(
                 "chunk_summary": item.get("chunk_summary", "No summary"),
                 "similarity": similarity,
                 "rank_score": rank_score,
+                "retrieved_at": retrieved_at,
                 "relationship": relationship,
                 "retrieval_path": computed_path,
                 "hop_count": computed_hop_count,
@@ -2497,6 +2577,7 @@ def query_graph_with_trace(
             "query_profile": query_profile,
             "graph_depth": graph_depth,
             "matched_entities": matched_entities,
+            "retrieved_at": retrieved_at,
             "result_count": len(evidence),
             "max_hop_count": max((item["hop_count"] for item in evidence), default=0),
             "retrieval_path": evidence[0]["retrieval_path"] if evidence else _build_path_summary(personalized_lookup, None)["path"],
@@ -2518,6 +2599,7 @@ def query_graph_with_trace(
                 "query_profile": query_profile,
                 "graph_depth": graph_depth,
                 "matched_entities": [],
+                "retrieved_at": retrieved_at,
                 "result_count": 0,
                 "max_hop_count": 0,
                 "retrieval_path": _build_path_summary(personalized_lookup, None)["path"],
@@ -2612,7 +2694,8 @@ def generate_groq_response(
         if query_type in FACT_PRIORITY_QUERY_TYPES:
             retrieval_guidance = (
                 "This is a task or commitment lookup. Prioritize current CanonicalFact evidence over chunk summaries. "
-                "Prefer the most temporally relevant active fact over stale past facts, and use chunk evidence only to support provenance, add timestamps, or clarify ambiguity. "
+                "Prefer the most temporally relevant active fact over stale past facts, and use chunk evidence only to support provenance or clarify ambiguity. "
+                "Use timestamp metadata silently for recency decisions; do not expose retrieval/source timestamp metadata in the visible answer unless the user asks for it. "
                 "Do not list older alternatives unless the user asked for history or the top evidence is genuinely conflicting."
             )
         elif (retrieval_trace or {}).get("evidence"):

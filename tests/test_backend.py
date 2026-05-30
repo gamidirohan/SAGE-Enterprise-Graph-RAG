@@ -48,8 +48,11 @@ class _Session:
         self.rows = rows or []
         self.should_fail = should_fail
         self.handler = handler
+        self.queries = []
 
     def run(self, *args, **kwargs):
+        if args:
+            self.queries.append(args[0])
         if self.should_fail:
             raise RuntimeError("db error")
         if self.handler:
@@ -358,10 +361,22 @@ def test_sync_messages_endpoint(monkeypatch):
 
 def test_debug_graph_endpoint_summary_only_skips_expensive_sections(monkeypatch):
     def handler(query, **_params):
-        if "MATCH (n)" in query:
+        if "CALL db.labels()" in query:
+            return [{"label": "Document"}, {"label": "Person"}]
+        if "CALL db.relationshipTypes()" in query:
+            return [{"relationshipType": "PART_OF"}, {"relationshipType": "SENT"}]
+        if "MATCH (n)" in query and "RETURN count(n) AS Count" in query:
+            return [{"Count": 5}]
+        if "MATCH ()-[r]->()" in query and "RETURN count(r) AS Count" in query:
+            return [{"Count": 7}]
+        if "MATCH (n:`Document`)" in query:
             return [{"Label": "Document", "Count": 3}]
-        if "MATCH ()-[r]->()" in query:
+        if "MATCH (n:`Person`)" in query:
+            return [{"Label": "Person", "Count": 2}]
+        if "MATCH ()-[r:`PART_OF`]->()" in query:
             return [{"RelationType": "PART_OF", "Count": 4}]
+        if "MATCH ()-[r:`SENT`]->()" in query:
+            return [{"RelationType": "SENT", "Count": 3}]
         raise AssertionError(f"Unexpected query executed: {query}")
 
     session = _Session(handler=handler)
@@ -371,11 +386,15 @@ def test_debug_graph_endpoint_summary_only_skips_expensive_sections(monkeypatch)
 
     result = asyncio.run(backend.debug_graph_endpoint(summary_only=True))
 
-    assert result["node_counts"] == [{"Label": "Document", "Count": 3}]
-    assert result["rel_counts"] == [{"RelationType": "PART_OF", "Count": 4}]
+    assert result["total_nodes"] == 5
+    assert result["total_relationships"] == 7
+    assert result["node_counts"] == [{"Label": "Document", "Count": 3}, {"Label": "Person", "Count": 2}]
+    assert result["rel_counts"] == [{"RelationType": "PART_OF", "Count": 4}, {"RelationType": "SENT", "Count": 3}]
     assert result["sample_docs"] == []
     assert result["connectivity"] == []
     assert result["entity_doc_connections"] == []
+    assert all("labels(n)[0]" not in query for query in session.queries)
+    assert all("WHERE NOT (n)--()" not in query for query in session.queries)
     assert driver.closed is True
 
 

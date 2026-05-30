@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional
 
 try:
@@ -41,6 +42,8 @@ SCHEMA_SNAPSHOT: Dict[str, List[str]] = {
 
 DEFAULT_EXPAND_HOPS = 1
 MAX_EXPAND_HOPS = 3
+DEFAULT_GRAPH_EXPAND_SEED_LIMIT = max(1, int(os.getenv("SAGE_GRAPH_EXPAND_SEED_LIMIT", "20")))
+DEFAULT_GRAPH_CONTEXT_PER_SEED_LIMIT = max(1, int(os.getenv("SAGE_GRAPH_CONTEXT_PER_SEED_LIMIT", "3")))
 
 
 def schema_snapshot() -> Dict[str, List[str]]:
@@ -66,7 +69,7 @@ GRAPH_CONTEXT_FROM_CHUNK_QUERY = """
         ] AS path_nodes,
         [coalesce(type(r), 'PART_OF'), 'PART_OF'] AS path_relationships
     ORDER BY relationship ASC
-    LIMIT 3
+    LIMIT $context_limit
 """
 
 GRAPH_CONTEXT_FROM_FACT_QUERY = """
@@ -103,7 +106,7 @@ def _build_graph_context_from_chunk_query(expand_hops: int) -> str:
           AND NOT n:Document
         RETURN p, n
         ORDER BY length(p) DESC
-        LIMIT 3
+        LIMIT $context_limit
     }}
     RETURN
         c.chunk_id AS chunk_id,
@@ -120,7 +123,7 @@ def _build_graph_context_from_chunk_query(expand_hops: int) -> str:
         ] AS path_nodes,
         [rel IN relationships(p) | type(rel)] AS path_relationships
     ORDER BY hop_count ASC, relationship ASC
-    LIMIT 3
+    LIMIT $context_limit
     """
 
 
@@ -157,16 +160,22 @@ def expand_retrieval_context(
     ranked_rows: List[Dict[str, Any]] = []
     try:
         with utils.open_neo4j_session(driver, utils.NEO4J_DATABASE) as session:
-            for rank, item in enumerate(evidence[:3], start=1):
+            for rank, item in enumerate(evidence[:DEFAULT_GRAPH_EXPAND_SEED_LIMIT], start=1):
                 base_score = max(float(item.get("rank_score", item.get("similarity", 0.5)) or 0.5) - (rank * 0.01), 0.1)
                 if item.get("chunk_id"):
                     chunk_query = _build_graph_context_from_chunk_query(resolved_expand_hops)
-                    rows = session.run(chunk_query, chunk_id=item["chunk_id"], base_score=base_score).data()
+                    rows = session.run(
+                        chunk_query,
+                        chunk_id=item["chunk_id"],
+                        base_score=base_score,
+                        context_limit=DEFAULT_GRAPH_CONTEXT_PER_SEED_LIMIT,
+                    ).data()
                     if not rows and resolved_expand_hops > DEFAULT_EXPAND_HOPS:
                         rows = session.run(
                             GRAPH_CONTEXT_FROM_CHUNK_QUERY,
                             chunk_id=item["chunk_id"],
                             base_score=base_score,
+                            context_limit=DEFAULT_GRAPH_CONTEXT_PER_SEED_LIMIT,
                         ).data()
                     ranked_rows.extend(
                         services._prepare_chunk_result(row, focus_terms=[], reports_to_lookup=False)
@@ -215,7 +224,7 @@ def expand_retrieval_context(
     finally:
         driver.close()
 
-    merged = services._merge_ranked_results(ranked_rows, [], limit=5)
+    merged = services._merge_ranked_results(ranked_rows, [], limit=services.DEFAULT_RETRIEVAL_LIMIT)
     if not merged:
         return {
             "documents": [],

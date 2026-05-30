@@ -316,3 +316,32 @@ def test_policy_guard_accepts_direct_attribute_answer_from_focused_evidence():
 
     assert verdict["passed"] is True
     assert "missing_required_answer_relation:reports_to" not in verdict["issues"]
+
+
+def test_policy_guard_rejects_weak_focus_task_evidence_for_direct_deadline_lookup():
+    verdict = policy_guard.evaluate_answer(
+        query="By when does george has to submit the project alpha documents",
+        answer="Fresh Alice 950 starts working on Project Alpha on 9pm.",
+        answer_payload={
+            "summary": "Fresh Alice 950 starts working on Project Alpha on 9pm.",
+            "bullets": [],
+            "evidence_refs": ["fact:fact-assignment"],
+        },
+        trace={
+            "query_type": "task_commitment_lookup",
+            "query_profile": {"expects_multiple_items": False, "requires_broad_coverage": False},
+            "coverage": {"distinct_evidence_count": 1},
+            "evidence": [
+                {
+                    "fact_id": "fact-assignment",
+                    "fact_summary": "Fresh Alice 950 starts working on Project Alpha on 9pm.",
+                    "fact": {"claim_type": "ASSIGNMENT_STATE", "display_summary": "Fresh Alice 950 starts working on Project Alpha on 9pm."},
+                    "document": {"doc_id": "chat-msg-assignment", "content": "Fresh Alice 950 starts working on Project Alpha on 9pm."},
+                }
+            ],
+        },
+        plan={"query_profile": {"expects_multiple_items": False, "requires_broad_coverage": False}},
+    )
+
+    assert verdict["passed"] is False
+    assert "unfocused_evidence_for_direct_lookup" in verdict["issues"]

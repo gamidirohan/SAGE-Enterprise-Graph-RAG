@@ -186,6 +186,13 @@ def test_extract_query_focus_terms_keeps_short_acronyms():
     assert "hq" in services._extract_query_focus_terms("What is the office address for HQ?")
 
 
+def test_extract_query_focus_terms_drops_auxiliary_has_from_task_query():
+    focus_terms = services._extract_query_focus_terms("By when does george has to submit the project alpha documents")
+
+    assert "has" not in focus_terms
+    assert {"george", "submit", "alpha", "documents"}.issubset(set(focus_terms))
+
+
 def test_generate_groq_response_abstains_on_unfocused_direct_lookup_evidence(monkeypatch):
     monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
 
@@ -210,6 +217,35 @@ def test_generate_groq_response_abstains_on_unfocused_direct_lookup_evidence(mon
 
     assert result["answer"] == "I couldn't find relevant evidence for that lookup."
     assert result["answer_payload"]["evidence_refs"] == ["fact:fact-busy"]
+
+
+def test_generate_groq_response_abstains_on_weak_focus_task_evidence(monkeypatch):
+    monkeypatch.setattr(services, "_create_groq_client", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")))
+
+    trace = {
+        "query_type": "task_commitment_lookup",
+        "query_profile": {"wants_list_format": False, "requires_broad_coverage": False},
+        "evidence": [
+            {
+                "fact_id": "fact-assignment",
+                "fact_summary": "Fresh Alice 950 starts working on Project Alpha on 9pm.",
+                "fact": {
+                    "claim_type": "ASSIGNMENT_STATE",
+                    "display_summary": "Fresh Alice 950 starts working on Project Alpha on 9pm.",
+                    "temporal_start": "2026-05-14T21:00:00+00:00",
+                },
+                "document": {"doc_id": "chat-msg-assignment", "content": "Fresh Alice 950 starts working on Project Alpha on 9pm."},
+            }
+        ],
+    }
+
+    result = services.generate_groq_response(
+        "By when does george has to submit the project alpha documents",
+        ["Fact Summary: Fresh Alice 950 starts working on Project Alpha on 9pm."],
+        retrieval_trace=trace,
+    )
+
+    assert result["answer"] == "I couldn't find relevant evidence for that lookup."
 
 
 def test_query_graph_with_trace_does_not_scope_broad_summary_to_authenticated_user(monkeypatch):
@@ -1124,6 +1160,7 @@ def test_build_response_context_hides_internal_metadata_but_keeps_group_signal()
     context = services._build_response_context(
         [],
         retrieval_trace={
+            "retrieved_at": "2026-05-12T10:15:00Z",
             "evidence": [
                 {
                     "chunk_id": "chunk-investor",
@@ -1133,7 +1170,9 @@ def test_build_response_context_hides_internal_metadata_but_keeps_group_signal()
                         "subject": "g-940-saia",
                         "sender": "9501",
                         "conversation_type": "group",
+                        "timestamp": "2026-05-11T09:00:00Z",
                     },
+                    "retrieved_at": "2026-05-12T10:15:00Z",
                     "related_node": {"display_name": "g-940-saia"},
                 },
                 {
@@ -1146,8 +1185,10 @@ def test_build_response_context_hides_internal_metadata_but_keeps_group_signal()
                         "subject_entity_id": "g-940-saia",
                         "temporal_start": "2026-05-11T10:00:00Z",
                         "temporal_granularity": "datetime",
+                        "last_seen_at": "2026-05-11T09:10:00Z",
                     },
-                    "document": {"doc_id": "chat-msg-review", "conversation_type": "group"},
+                    "document": {"doc_id": "chat-msg-review", "conversation_type": "group", "timestamp": "2026-05-11T09:05:00Z"},
+                    "retrieved_at": "2026-05-12T10:15:00Z",
                 },
             ]
         },
@@ -1158,6 +1199,9 @@ def test_build_response_context_hides_internal_metadata_but_keeps_group_signal()
     assert "9501" not in context
     assert "chat-msg-investor" not in context
     assert "canonical_key" not in context.lower()
+    assert "Message Time: 2026-05-11 02:30 PM IST" in context
+    assert "Source Message Time: 2026-05-11 02:35 PM IST" in context
+    assert "Retrieved At: 2026-05-12 03:45 PM IST" in context
 
 
 def test_generate_groq_response_uses_fact_summary_for_task_when_lookup(monkeypatch):

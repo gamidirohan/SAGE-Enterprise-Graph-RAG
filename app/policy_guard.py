@@ -49,6 +49,15 @@ _FOCUS_STOPWORDS = {
     "or",
     "from",
     "about",
+    "start",
+    "starts",
+    "started",
+    "starting",
+    "work",
+    "works",
+    "worked",
+    "working",
+    "project",
     "me",
     "my",
     "you",
@@ -69,6 +78,9 @@ _FOCUS_STOPWORDS = {
     "was",
     "were",
     "am",
+    "has",
+    "have",
+    "had",
     "can",
     "will",
     "would",
@@ -222,6 +234,16 @@ def _requires_direct_focus_match(query: str, *, query_type: str, profile: Dict[s
     return bool(_DIRECT_LOOKUP_PREFIX.search(query or ""))
 
 
+def _minimum_focus_match_threshold(query: str, *, query_type: str, profile: Dict[str, Any], focus_terms: List[str]) -> int:
+    if not focus_terms or profile.get("wants_list_format") or profile.get("requires_broad_coverage"):
+        return 0
+    if query_type in {"task_commitment_lookup", "schedule_or_timeline"}:
+        return 2 if len(focus_terms) >= 2 else 0
+    if _requires_direct_focus_match(query, query_type=query_type, profile=profile):
+        return 1
+    return 0
+
+
 def _evidence_focus_match_score(item: Dict[str, Any], focus_terms: List[str]) -> int:
     if not focus_terms:
         return 0
@@ -340,11 +362,17 @@ def evaluate_answer(
         issues.append(f"missing_required_answer_slot:{slot}")
 
     focus_terms = _extract_focus_terms(query)
+    minimum_focus_match = _minimum_focus_match_threshold(
+        query,
+        query_type=query_type,
+        profile=profile,
+        focus_terms=focus_terms,
+    )
     if (
         evidence
         and focus_terms
-        and _requires_direct_focus_match(query, query_type=query_type, profile=profile)
-        and not any(_evidence_focus_match_score(item, focus_terms) > 0 for item in evidence)
+        and minimum_focus_match > 0
+        and max((_evidence_focus_match_score(item, focus_terms) for item in evidence), default=0) < minimum_focus_match
         and not uncertainty_answer
     ):
         issues.append("unfocused_evidence_for_direct_lookup")

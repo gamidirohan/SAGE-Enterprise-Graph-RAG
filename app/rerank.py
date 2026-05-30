@@ -18,7 +18,8 @@ except ImportError:  # pragma: no cover - direct execution fallback
 
 
 DEFAULT_RERANK_MODEL = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
-DEFAULT_RERANK_TOP_K = max(1, int(os.getenv("RERANK_TOP_K", "3")))
+DEFAULT_RERANK_TOP_K = max(1, int(os.getenv("RERANK_TOP_K", "20")))
+DEFAULT_RERANK_CONFLICT_TOP_K = max(1, int(os.getenv("RERANK_CONFLICT_TOP_K", str(DEFAULT_RERANK_TOP_K))))
 MODEL_CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache" / "models"
 MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -348,13 +349,14 @@ def _filter_unfocused_lookup_evidence(
     query_type: str,
     query_profile: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    require_focus_match = services._requires_direct_focus_match(
+    minimum_focus_match = services._minimum_focus_match_threshold(
         query,
         query_type=query_type,
         query_profile=query_profile,
+        focus_terms=services._extract_query_focus_terms(query),
     )
     if query_type not in {"task_commitment_lookup", "schedule_or_timeline"}:
-        if not require_focus_match:
+        if minimum_focus_match <= 0:
             return items
     if query_profile.get("wants_list_format") or query_profile.get("expects_multiple_items"):
         return items
@@ -363,9 +365,24 @@ def _filter_unfocused_lookup_evidence(
     if not focus_terms:
         return items
 
-    focused = [item for item in items if _focus_match_score(item, focus_terms) > 0]
-    if require_focus_match:
+    scored_items = [
+        (item, max(int(item.get("focus_match_score") or 0), _focus_match_score(item, focus_terms)))
+        for item in items
+    ]
+
+    if minimum_focus_match > 0:
+        focused = [item for item, score in scored_items if score >= minimum_focus_match]
+        if not focused:
+            return focused
+        if len(focus_terms) >= 2:
+            strongest_focus = max(score for _item, score in scored_items if score >= minimum_focus_match)
+            focused = [item for item, score in scored_items if score == strongest_focus]
         return focused
+    focused = [item for item, score in scored_items if score > 0]
+    if len(focus_terms) >= 2 and focused:
+        strongest_focus = max(score for _item, score in scored_items if score > 0)
+        if strongest_focus > 1:
+            return [item for item, score in scored_items if score == strongest_focus]
     if not focused:
         return items
     return focused
@@ -387,7 +404,7 @@ def _apply_lookup_conflicts(
 
     for signal in (task_ambiguity, fact_conflict):
         if signal.get("ambiguous"):
-            top_k = min(max(top_k, int(signal.get("candidate_count") or 2)), len(items), 3)
+            top_k = min(max(top_k, int(signal.get("candidate_count") or 2)), len(items), DEFAULT_RERANK_CONFLICT_TOP_K)
 
     return top_k, task_ambiguity, fact_conflict
 
@@ -450,6 +467,11 @@ def _unique_documents(items: Iterable[Dict[str, Any]]) -> List[str]:
 def rerank(documents: List[str], trace: Dict[str, Any] | None) -> Dict[str, Any]:
     reranked_trace = dict(trace or {})
     evidence = [dict(item) for item in (reranked_trace.get("evidence") or [])]
+    retrieved_at = str(reranked_trace.get("retrieved_at") or services._retrieval_timestamp())
+    for item in evidence:
+        item.setdefault("retrieved_at", retrieved_at)
+    if evidence:
+        reranked_trace["retrieved_at"] = retrieved_at
     query = str(reranked_trace.get("query") or "").strip()
     query_type = str(reranked_trace.get("query_type") or "").strip()
     query_profile = dict(reranked_trace.get("query_profile") or query_shape.analyze_query(query))

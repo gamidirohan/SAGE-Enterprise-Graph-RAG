@@ -47,7 +47,7 @@ def test_rerank_disables_semantic_reranking_when_cross_encoder_is_unavailable(mo
     assert "Gen 1 reset guide" in result["documents"][0]
 
 
-def test_rerank_trims_to_top_k_and_preserves_score_sort_without_query():
+def test_rerank_preserves_larger_default_top_k_and_score_sort_without_query():
     trace = {
         "evidence": [
             {"chunk_id": "chunk-1", "chunk_summary": "one", "rank_score": 0.4, "similarity": 0.4, "document": {"doc_id": "doc-1"}},
@@ -60,8 +60,8 @@ def test_rerank_trims_to_top_k_and_preserves_score_sort_without_query():
     result = rerank.rerank([], trace)
 
     assert result["trace"]["reranker"]["method"] == "score_sort"
-    assert result["trace"]["result_count"] == 3
-    assert [item["chunk_id"] for item in result["trace"]["evidence"]] == ["chunk-2", "chunk-3", "chunk-4"]
+    assert result["trace"]["result_count"] == 4
+    assert [item["chunk_id"] for item in result["trace"]["evidence"]] == ["chunk-2", "chunk-3", "chunk-4", "chunk-1"]
 
 
 def test_rerank_collapses_duplicate_evidence_and_keeps_distinct_candidate(monkeypatch):
@@ -221,6 +221,42 @@ def test_rerank_returns_no_evidence_for_direct_attribute_lookup_when_nothing_mat
     assert result["trace"]["result_count"] == 0
     assert result["trace"]["no_evidence"] is True
     assert result["documents"] == []
+
+
+def test_rerank_prefers_strongest_focus_match_for_narrow_task_lookup(monkeypatch):
+    trace = {
+        "query": "By when does george has to submit the project alpha documents",
+        "query_type": "task_commitment_lookup",
+        "query_profile": {"wants_list_format": False, "requires_broad_coverage": False},
+        "evidence": [
+            {
+                "fact_id": "fact-assignment",
+                "fact_summary": "Fresh Alice 950 starts working on Project Alpha on 9pm.",
+                "rank_score": 9.0,
+                "document": {"doc_id": "doc-assignment"},
+                "fact": {
+                    "claim_type": "ASSIGNMENT_STATE",
+                    "display_summary": "Fresh Alice 950 starts working on Project Alpha on 9pm.",
+                },
+            },
+            {
+                "fact_id": "fact-submit",
+                "fact_summary": "George has to submit the Project Alpha documents by Wednesday 8 pm.",
+                "rank_score": 1.0,
+                "document": {"doc_id": "doc-submit"},
+                "fact": {
+                    "claim_type": "TASK_ASSIGNMENT",
+                    "display_summary": "George has to submit the Project Alpha documents by Wednesday 8 pm.",
+                },
+            },
+        ],
+    }
+    monkeypatch.setattr(rerank, "_cross_encoder_scores", lambda *_args, **_kwargs: ([9.0, 1.0], "fake"))
+
+    result = rerank.rerank([], trace)
+
+    assert result["trace"]["result_count"] == 1
+    assert result["trace"]["evidence"][0]["fact_id"] == "fact-submit"
 
 
 def test_rerank_keeps_conflicting_current_reports_to_facts(monkeypatch):
