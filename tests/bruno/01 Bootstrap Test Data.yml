@@ -1,0 +1,115 @@
+info:
+  name: Bootstrap Test Data
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: http://127.0.0.1:8000/api/bootstrap
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "users": [
+          {
+            "id": "1",
+            "name": "Alice Johnson",
+            "email": "alice@example.com",
+            "avatar": "A",
+            "team": ["Project Alpha", "Marketing"],
+            "isBot": false,
+            "isPinned": false
+          },
+          {
+            "id": "2",
+            "name": "Bob Smith",
+            "email": "bob@example.com",
+            "avatar": "B",
+            "team": ["Project Alpha", "Engineering"],
+            "isBot": false,
+            "isPinned": false
+          },
+          {
+            "id": "3",
+            "name": "Charlie Davis",
+            "email": "charlie@example.com",
+            "avatar": "C",
+            "team": ["Project Beta", "Design"],
+            "isBot": false,
+            "isPinned": false
+          },
+          {
+            "id": "4",
+            "name": "Diana Wilson",
+            "email": "diana@example.com",
+            "avatar": "D",
+            "team": ["Project Beta", "Engineering"],
+            "isBot": false,
+            "isPinned": false
+          },
+          {
+            "id": "5",
+            "name": "Elijah Parker",
+            "email": "elijah@example.com",
+            "avatar": "E",
+            "team": ["Project Alpha", "Design"],
+            "isBot": false,
+            "isPinned": false
+          },
+          {
+            "id": "6",
+            "name": "Fiona Lee",
+            "email": "fiona@example.com",
+            "avatar": "F",
+            "team": ["Project Gamma", "Management"],
+            "isBot": false,
+            "isPinned": false
+          },
+          {
+            "id": "7",
+            "name": "George Brown",
+            "email": "george@example.com",
+            "avatar": "G",
+            "team": ["Project Gamma", "Engineering"],
+            "isBot": false,
+            "isPinned": false
+          },
+          {
+            "id": "8",
+            "name": "Hannah Garcia",
+            "email": "hannah@example.com",
+            "avatar": "H",
+            "team": ["Project Beta", "Management"],
+            "isBot": false,
+            "isPinned": false
+          },
+          {
+            "id": "currentUser",
+            "name": "Test User",
+            "email": "test@example.com",
+            "avatar": "T",
+            "team": ["Project Alpha", "Project Gamma"],
+            "isBot": false,
+            "isPinned": false
+          }
+        ],
+        "groups": [
+          {
+            "id": "group-bruno-saia",
+            "name": "Project Alpha Weekly Review",
+            "description": "Admin-managed group for the weekly Project Alpha sync.",
+            "avatar": "PA",
+            "memberIds": ["1", "2", "4", "currentUser"]
+          }
+        ],
+        "messages": []
+      }
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

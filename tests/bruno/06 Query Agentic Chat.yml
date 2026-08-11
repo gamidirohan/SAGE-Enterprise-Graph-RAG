@@ -1,0 +1,25 @@
+info:
+  name: Query Agentic Chat
+  type: http
+  seq: 7
+
+http:
+  method: POST
+  url: http://127.0.0.1:8000/api/chat
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "message": "{{chat_prompt}}",
+        "user_id": "{{user_id}}",
+        "agentic_mode": true
+      }
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
